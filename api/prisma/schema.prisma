@@ -1,0 +1,222 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrgRole {
+  ADMIN
+  MEMBER
+}
+
+enum TeamRole {
+  LEADER
+  MEMBER
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  BLOCKED
+  DONE
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+model User {
+  id                  String            @id @default(cuid())
+  email               String?           @unique
+  handle              String            @unique
+  name                String?
+  identities          Identity[]
+  memberships         OrgMembership[]
+  teamMemberships     TeamMembership[]
+  notes               TaskNote[]
+  createdAt           DateTime          @default(now())
+  TaskAssignment      TaskAssignment[]
+  TaskNoteMention     TaskNoteMention[]
+  googleEmail         String?   // NEW (who we’re syncing to)
+  googleRefreshToken  String?
+}
+
+model Identity {
+  id         String @id @default(cuid())
+  userId     String
+  provider   String
+  providerId String
+  user       User   @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerId])
+}
+
+model Organization {
+  id          String          @id @default(cuid())
+  name        String
+  createdBy   String
+  memberships OrgMembership[]
+  teams       Team[]
+  orgJoinCodes OrgJoinCode[]
+  createdAt   DateTime        @default(now())
+}
+
+model OrgMembership {
+  id     String       @id @default(cuid())
+  orgId  String
+  userId String
+  role   OrgRole
+  org    Organization @relation(fields: [orgId], references: [id])
+  user   User         @relation(fields: [userId], references: [id])
+
+  @@unique([orgId, userId])
+}
+
+model Team {
+  id          String           @id @default(cuid())
+  orgId       String
+  name        String
+  createdBy   String
+  org         Organization     @relation(fields: [orgId], references: [id])
+  memberships TeamMembership[]
+  goals       Goal[]
+  tasks       Task[]
+  events      CalendarEvent[]
+  joinCodes   TeamJoinCode[]
+  createdAt   DateTime         @default(now())
+  info   String?
+  links  TeamLink[]
+}
+
+model TeamLink {
+  id      String  @id @default(cuid())
+  teamId  String
+  label   String
+  url     String
+  ordinal Int      @default(0)
+
+  team Team @relation(fields: [teamId], references: [id])
+
+  @@index([teamId, ordinal])
+}
+
+model TeamMembership {
+  id     String   @id @default(cuid())
+  teamId String
+  userId String
+  role   TeamRole @default(MEMBER)
+  team   Team     @relation(fields: [teamId], references: [id])
+  user   User     @relation(fields: [userId], references: [id])
+
+  @@unique([teamId, userId])
+}
+
+model TeamJoinCode {
+  id        String    @id @default(cuid())
+  teamId    String
+  code      String    @unique
+  expiresAt DateTime?
+  maxUses   Int?
+  uses      Int       @default(0)
+  team      Team      @relation(fields: [teamId], references: [id])
+}
+
+model OrgJoinCode {
+  id        String   @id @default(cuid())
+  orgId     String
+  code      String   @unique
+  expiresAt DateTime?
+  maxUses   Int?
+  uses      Int      @default(0)
+  createdAt DateTime @default(now())
+
+  org       Organization @relation(fields: [orgId], references: [id])
+}
+
+model Goal {
+  id          String    @id @default(cuid())
+  teamId      String
+  title       String
+  description String?
+  dueDate     DateTime?
+  status      String    @default("PLANNED")
+  team        Team      @relation(fields: [teamId], references: [id])
+  tasks       Task[]
+}
+
+model Task {
+  id            String           @id @default(cuid())
+  teamId        String
+  goalId        String?
+  title         String
+  description   String?
+  status        TaskStatus       @default(TODO)
+  priority      Priority         @default(MEDIUM)
+  dueDate       DateTime?
+  createdBy     String
+  team          Team             @relation(fields: [teamId], references: [id])
+  goal          Goal?            @relation(fields: [goalId], references: [id])
+  assignees     TaskAssignment[]
+  notes         TaskNote[]
+  createdAt     DateTime         @default(now())
+  calendarEvents CalendarEvent[]
+}
+
+model TaskAssignment {
+  id     String @id @default(cuid())
+  taskId String
+  userId String
+  task   Task   @relation(fields: [taskId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@unique([taskId, userId])
+}
+
+model TaskNote {
+  id        String            @id @default(cuid())
+  taskId    String
+  authorId  String
+  content   String
+  createdAt DateTime          @default(now())
+  task      Task              @relation(fields: [taskId], references: [id])
+  author    User              @relation(fields: [authorId], references: [id])
+  mentions  TaskNoteMention[]
+}
+
+model TaskNoteMention {
+  id     String   @id @default(cuid())
+  noteId String
+  userId String
+  note   TaskNote @relation(fields: [noteId], references: [id])
+  user   User     @relation(fields: [userId], references: [id])
+
+  @@unique([noteId, userId])
+}
+
+enum CalendarItemType {
+  TASK
+  EVENT
+}
+
+model CalendarEvent {
+  id               String   @id @default(cuid())
+  teamId           String
+  title            String
+  description      String?
+  type             CalendarItemType @default(EVENT)
+  startAt          DateTime
+  endAt            DateTime
+  googleEventId    String?  @unique
+  googleCalendarId String?
+  syncedAt         DateTime?
+  location         String?
+  createdAt        DateTime @default(now())
+  relatedTaskId    String?
+  team             Team     @relation(fields: [teamId], references: [id])
+  task             Task?    @relation(fields: [relatedTaskId], references: [id])
+}
