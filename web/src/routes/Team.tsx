@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useLayoutEffect, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import dayjs, { Dayjs } from "dayjs";
@@ -19,13 +19,11 @@ const STATUS = [
 type Perms = {
   role: "ADMIN" | "LEADER" | "MEMBER";
   canCreateTasks: boolean;
-  canAssign: boolean;   // assign/unassign
+  canAssign: boolean;
   canWriteAll: boolean; // admin/leader
 };
 
 const DUE_SOON_HOURS = 48;
-
-/* Helpers */
 const isOverdue = (t: any) =>
   !!t.dueDate && dayjs(t.dueDate).isBefore(dayjs()) && t.status !== "DONE";
 const isDueSoon = (t: any) =>
@@ -33,6 +31,34 @@ const isDueSoon = (t: any) =>
   !isOverdue(t) &&
   dayjs(t.dueDate).isBefore(dayjs().add(DUE_SOON_HOURS, "hour")) &&
   t.status !== "DONE";
+
+/* --- Calendar color helpers (status-based + overdue/soon halos) -------- */
+
+type TaskLike = { status?: StatusKey; dueDate?: string | null };
+function calChipClasses(t: TaskLike) {
+  const s = (t.status as StatusKey) || "TODO";
+  const base = "w-full text-left text-xs truncate px-2 py-0.5 rounded border transition";
+  const byStatus: Record<StatusKey, string> = {
+    TODO:        "bg-slate-100 hover:bg-slate-200 border-slate-200 text-slate-800",
+    IN_PROGRESS: "bg-indigo-100 hover:bg-indigo-200 border-indigo-200 text-indigo-800",
+    BLOCKED:     "bg-rose-100 hover:bg-rose-200 border-rose-200 text-rose-800",
+    DONE:        "bg-emerald-100 hover:bg-emerald-200 border-emerald-200 text-emerald-800",
+  };
+  const halo = isOverdue(t) ? " ring-1 ring-rose-400/70" : isDueSoon(t) ? " ring-1 ring-amber-400/70" : "";
+  return `${base} ${byStatus[s]}${halo}`;
+}
+function dayCardClasses(t: TaskLike) {
+  const s = (t.status as StatusKey) || "TODO";
+  const base = "w-full text-left rounded-xl p-3 hover:bg-slate-50 border";
+  const byStatusBorder: Record<StatusKey, string> = {
+    TODO:        "border-slate-200 border-l-4 border-l-slate-400/80",
+    IN_PROGRESS: "border-indigo-200 border-l-4 border-l-indigo-400/80",
+    BLOCKED:     "border-rose-200 border-l-4 border-l-rose-400/80",
+    DONE:        "border-emerald-200 border-l-4 border-l-emerald-400/80",
+  };
+  const halo = isOverdue(t) ? " ring-1 ring-rose-400/70" : isDueSoon(t) ? " ring-1 ring-amber-400/70" : "";
+  return `${base} ${byStatusBorder[s]}${halo}`;
+}
 
 /* ---------------------------------------------------------------------- */
 /* Page                                                                    */
@@ -66,14 +92,19 @@ export default function Team() {
   if (!id) return null;
 
   return (
-    <div className="min-h-screen">
+    <div className="relative min-h-screen overflow-x-hidden">
+      {/* Background layer (always behind) */}
+      <div aria-hidden className="absolute inset-0 z-0 overflow-hidden pointer-events-none">
+        <div className="absolute inset-0 bg-gradient-to-br from-slate-50 via-indigo-50 to-sky-50" />
+        <div className="absolute -top-28 -left-28 h-[520px] w-[520px] rounded-full bg-sky-200/40 blur-3xl" />
+        <div className="absolute -bottom-28 -right-28 h-[520px] w-[520px] rounded-full bg-indigo-200/40 blur-3xl" />
+      </div>
+
       {/* Top bar */}
       <div className="sticky top-0 z-20 border-b bg-white/70 backdrop-blur">
         <div className="container flex h-14 items-center justify-between gap-3">
           <Link to="/orgs" className="btn-outline shrink-0">← Back</Link>
-
           <h1 className="text-lg font-semibold truncate">{teamName}</h1>
-
           <div className="inline-flex rounded-xl border bg-white p-1 shrink-0">
             <TabButton active={tab==="tasks"} onClick={()=>setTab("tasks")}>Tasks</TabButton>
             <TabButton active={tab==="deadlines"} onClick={()=>setTab("deadlines")}>Deadlines</TabButton>
@@ -82,7 +113,8 @@ export default function Team() {
         </div>
       </div>
 
-      <div className="container py-6 space-y-8">
+      {/* Content above background */}
+      <div className="relative z-10 container py-6 space-y-8">
         {tab === "tasks"     && <TasksTab teamId={id} />}
         {tab === "deadlines" && <DeadlinesTab teamId={id} />}
         {tab === "info"      && <InfoTab teamId={id} onRenamed={(n)=>setTeamName(n)} />}
@@ -109,7 +141,7 @@ function TabButton({ active, children, onClick }:{
   );
 }
 
-/* Small collapsible container */
+/* Small collapsible */
 function Collapsible({
   title, open, setOpen, children
 }:{
@@ -134,24 +166,265 @@ function Collapsible({
 function highlightMentions(text: string) {
   const parts = (text || "").split(/(@[a-zA-Z0-9_.~-]{2,30})/g);
   return parts.map((p, i) =>
-    p.startsWith("@") ? (
-      <span key={i} className="mention">{p}</span>
-    ) : (
-      <span key={i}>{p}</span>
-    )
+    p.startsWith("@") ? <span key={i} className="mention">{p}</span> : <span key={i}>{p}</span>
   );
 }
+
+/* Fit-to-viewport helper (for columns / calendar) */
+function useFitToViewport(ref: React.RefObject<HTMLElement>, bottomGap = 24) {
+  const [h, setH] = useState(560);
+  useLayoutEffect(() => {
+    const calc = () => {
+      const el = ref.current;
+      if (!el) return;
+      const top = el.getBoundingClientRect().top;
+      const next = Math.max(360, Math.floor(window.innerHeight - top - bottomGap));
+      setH(next);
+    };
+    calc();
+    window.addEventListener("resize", calc);
+    const obs = new ResizeObserver(calc);
+    obs.observe(document.body);
+    return () => {
+      window.removeEventListener("resize", calc);
+      obs.disconnect();
+    };
+  }, [ref, bottomGap]);
+  return h;
+}
+
+/* --------------------------- Shared Task Modal -------------------------- */
+
+function TaskModal({
+  task,
+  teamId,
+  perms,
+  members,
+  onClose,
+}:{
+  task: any;
+  teamId: string;
+  perms?: Perms;
+  members?: any[];
+  onClose: ()=>void;
+}) {
+  const qc = useQueryClient();
+  const [working, setWorking] = useState(false);
+
+  const [editMode, setEditMode] = useState(false);
+  const [title, setTitle] = useState(task.title || "");
+  const [description, setDescription] = useState(task.description || "");
+  const [due, setDue] = useState<string>(task.dueDate ? dayjs(task.dueDate).format("YYYY-MM-DDTHH:mm") : "");
+  const [note, setNote] = useState("");
+  const [assignPick, setAssignPick] = useState("");
+
+  const nameById = useMemo(
+    () => new Map<string, string>((members || []).map((m: any) => [m.userId, m.name || m.handle || m.userId])),
+    [members]
+  );
+
+  async function refreshSelf() {
+    await qc.invalidateQueries({ queryKey: ["tasks", teamId] });
+  }
+
+  async function setStatus(status: StatusKey) {
+    setWorking(true);
+    try {
+      await api.patch(`/tasks/${task.id}`, { status });
+      await refreshSelf();
+    } finally { setWorking(false); }
+  }
+
+  async function saveEdits() {
+    if (!perms?.canWriteAll) return;
+    setWorking(true);
+    try {
+      await api.patch(`/tasks/${task.id}`, {
+        title: title.trim() || "Untitled task",
+        description: description.trim() || null,
+        dueDate: due ? new Date(due).toISOString() : null,
+      });
+      await refreshSelf();
+      setEditMode(false);
+    } finally { setWorking(false); }
+  }
+
+  async function deleteTask() {
+    if (!perms?.canWriteAll) return;
+    if (!confirm("Delete this task? This cannot be undone.")) return;
+    setWorking(true);
+    try {
+      await api.delete(`/tasks/${task.id}`);
+      await refreshSelf();
+      onClose();
+    } finally { setWorking(false); }
+  }
+
+  async function postNote() {
+    const text = note.trim();
+    if (!text) return;
+    setWorking(true);
+    try {
+      await api.post(`/tasks/${task.id}/notes`, { content: text });
+      setNote("");
+      await refreshSelf();
+    } finally { setWorking(false); }
+  }
+
+  async function assign() {
+    if (!perms?.canWriteAll || !assignPick) return;
+    setWorking(true);
+    try {
+      await api.post(`/tasks/${task.id}/assignees`, { userId: assignPick });
+      setAssignPick("");
+      await refreshSelf();
+    } finally { setWorking(false); }
+  }
+
+  async function unassign(userId: string) {
+    if (!perms?.canWriteAll) return;
+    setWorking(true);
+    try {
+      await api.delete(`/tasks/${task.id}/assignees/${userId}`);
+      await refreshSelf();
+    } finally { setWorking(false); }
+  }
+
+  const overdue = isOverdue(task);
+  const soon = isDueSoon(task);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose} />
+      <div className="relative z-10 w-[min(760px,92vw)] max-h-[90vh] overflow-auto rounded-2xl border bg-white p-5 shadow-xl">
+        {/* Header */}
+        <div className="flex items-start justify-between gap-3">
+          {!editMode ? (
+            <div className="min-w-0">
+              <h3 className="text-lg font-semibold truncate">{task.title}</h3>
+              <div className="mt-1 text-sm text-slate-600">
+                Status:&nbsp;
+                <select
+                  className="select inline-block"
+                  defaultValue={task.status}
+                  onChange={(e)=>setStatus(e.target.value as StatusKey)}
+                  disabled={working}
+                >
+                  {STATUS.map(s=> <option key={s.key} value={s.key}>{s.label}</option>)}
+                </select>
+                {task.dueDate && <> · Deadline: {dayjs(task.dueDate).format("MMM D, YYYY HH:mm")}</>}
+              </div>
+              <div className="mt-1 flex gap-2">
+                {overdue && <span className="text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">Overdue</span>}
+                {!overdue && soon && <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Due soon</span>}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1">
+              <input className="input w-full" value={title} onChange={e=>setTitle(e.target.value)} placeholder="Title" />
+              <div className="mt-2 grid gap-2 md:grid-cols-[1fr_240px]">
+                <input className="input" value={description} onChange={e=>setDescription(e.target.value)} placeholder="Description" />
+                <input className="input" type="datetime-local" value={due} onChange={e=>setDue(e.target.value)} title="Deadline" />
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 shrink-0">
+            {!editMode ? (
+              <>
+                {perms?.canWriteAll && <button className="btn-outline" onClick={()=>setEditMode(true)}>Edit</button>}
+                {perms?.canWriteAll && <button className="btn-outline" onClick={deleteTask}>Delete</button>}
+                <button className="btn-outline" onClick={onClose}>X</button>
+              </>
+            ) : (
+              <>
+                <button className="btn" onClick={saveEdits} disabled={working}>{working ? "Saving…" : "Save"}</button>
+                <button className="btn-outline" onClick={()=>setEditMode(false)} disabled={working}>Cancel</button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {/* Description (read mode) */}
+        {!editMode && task.description && (
+          <div className="mt-3 text-slate-800 whitespace-pre-wrap">{task.description}</div>
+        )}
+
+        {/* Assignees */}
+        <div className="mt-4">
+          <div className="font-medium mb-1 text-sm">Assignees</div>
+          {task.assignees?.length ? (
+            <div className="flex flex-wrap gap-2 text-sm">
+              {task.assignees.map((a:any)=>(
+                <span key={a.userId} className="rounded-full border px-2 py-0.5 inline-flex items-center gap-2">
+                  {a.user?.name || a.user?.handle || nameById.get(a.userId) || a.userId}
+                  {perms?.canWriteAll && (
+                    <button className="text-slate-500 hover:text-slate-800" onClick={()=>unassign(a.userId)} title="Unassign">×</button>
+                  )}
+                </span>
+              ))}
+            </div>
+          ) : <div className="text-sm text-slate-500">None</div>}
+
+          {perms?.canWriteAll && (
+            <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+              <select className="select" value={assignPick} onChange={e=>setAssignPick(e.target.value)}>
+                <option value="">Assign to…</option>
+                {(members||[]).map((m:any)=>(
+                  <option key={m.userId} value={m.userId}>{m.name || m.handle || m.userId} {m.role === "LEADER" ? "• LEAD" : ""}</option>
+                ))}
+              </select>
+              <button className="btn" onClick={assign} disabled={!assignPick || working}>Assign</button>
+            </div>
+          )}
+        </div>
+
+        {/* Notes */}
+        <div className="mt-5">
+          <div className="font-semibold">Notes</div>
+          <div className="mt-2 space-y-2 max-h-48 overflow-auto pr-1">
+            {task.notes?.length ? (
+              task.notes.map((n:any)=> (
+                <div key={n.id} className="note text-sm">
+                  {highlightMentions(n.content)}
+                  <div className="text-xs text-slate-500 mt-1">
+                    {dayjs(n.createdAt).format("MMM D, HH:mm")}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="text-sm text-slate-500">No notes yet.</div>
+            )}
+          </div>
+
+          <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
+            <input
+              className="input"
+              placeholder="Add note (use @handle)"
+              value={note}
+              onChange={(e)=>setNote(e.target.value)}
+              onKeyDown={(e)=> e.key === "Enter" && postNote()}
+            />
+            <button className="btn" onClick={postNote} disabled={working}>Post</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ================================ TASKS TAB ============================= */
 
 function TasksTab({ teamId }: { teamId: string }) {
   const qc = useQueryClient();
 
-  // local UI (create)
+  // create
   const [newTask, setNewTask] = useState("");
   const [newDesc, setNewDesc] = useState("");
-  const [newDue, setNewDue]   = useState<string>(""); // datetime-local value
+  const [newDue, setNewDue]   = useState<string>("");
   const [showCreateMore, setShowCreateMore] = useState(false);
 
-  // local UI (per-task)
+  // per-task UI
   const [openNotes, setOpenNotes] = useState<Record<string, boolean>>({});
   const [noteText, setNoteText] = useState<Record<string, string>>({});
   const [assignPick, setAssignPick] = useState<Record<string, string>>({});
@@ -162,10 +435,14 @@ function TasksTab({ teamId }: { teamId: string }) {
   const [filterText, setFilterText] = useState("");
   const [filterStatus, setFilterStatus] = useState<"ALL" | StatusKey>("ALL");
   const [filterAssignee, setFilterAssignee] = useState<string>("ALL");
-  const [filterFrom, setFilterFrom] = useState<string>(""); // due from
-  const [filterTo, setFilterTo] = useState<string>("");     // due to
+  const [filterFrom, setFilterFrom] = useState<string>("");
+  const [filterTo, setFilterTo] = useState<string>("");
   const [filterOverdue, setFilterOverdue] = useState(false);
   const [filterSoon, setFilterSoon] = useState(false);
+
+  // column height fit
+  const boardRef = useRef<HTMLDivElement>(null);
+  const colH = useFitToViewport(boardRef, 24);
 
   // data
   const { data: me } = useQuery({ queryKey:["me"], queryFn: async()=> (await api.get("/me")).data });
@@ -185,7 +462,6 @@ function TasksTab({ teamId }: { teamId: string }) {
     enabled: !!teamId,
   });
 
-  // id -> display name
   const nameById = useMemo(
     () => new Map<string, string>((members || []).map((m: any) => [m.userId, m.name || m.handle || m.userId])),
     [members]
@@ -200,29 +476,18 @@ function TasksTab({ teamId }: { teamId: string }) {
     if (!title) return;
     try {
       await api.post(`/teams/${teamId}/tasks`, { title, description, dueDate });
-      setNewTask("");
-      setNewDesc("");
-      setNewDue("");
-      setShowCreateMore(false);
+      setNewTask(""); setNewDesc(""); setNewDue(""); setShowCreateMore(false);
       qc.invalidateQueries({ queryKey: ["tasks", teamId] });
     } catch (e) { console.error(e); }
   }
 
-  // optimistic status switch
   async function updateStatus(taskId: string, status: StatusKey) {
     const key = ["tasks", teamId] as const;
     const prev = qc.getQueryData<any[]>(key);
-    qc.setQueryData<any[]>(key, (old) =>
-      old ? old.map((t) => (t.id === taskId ? { ...t, status } : t)) : old
-    );
-    try {
-      await api.patch(`/tasks/${taskId}`, { status });
-    } catch (e) {
-      console.error(e);
-      qc.setQueryData(key, prev); // rollback
-    } finally {
-      qc.invalidateQueries({ queryKey: key });
-    }
+    qc.setQueryData<any[]>(key, (old) => old ? old.map((t) => (t.id === taskId ? { ...t, status } : t)) : old);
+    try { await api.patch(`/tasks/${taskId}`, { status }); }
+    catch (e) { console.error(e); qc.setQueryData(key, prev); }
+    finally { qc.invalidateQueries({ queryKey: key }); }
   }
 
   async function addNote(taskId: string) {
@@ -239,8 +504,6 @@ function TasksTab({ teamId }: { teamId: string }) {
     if (!perms?.canAssign) return;
     const userId = assignPick[taskId];
     if (!userId) return;
-
-    // prevent duplicate assignment locally
     const current = qc.getQueryData<any[]>(["tasks", teamId]);
     const t = current?.find((x) => x.id === taskId);
     if (t?.assignees?.some((a: any) => a.userId === userId)) return;
@@ -278,10 +541,7 @@ function TasksTab({ teamId }: { teamId: string }) {
 
   const filteredTasks = useMemo(() => {
     let list = (tasks || []) as any[];
-
-    if (onlyMine && myId) {
-      list = list.filter(t => t.assignees?.some((a:any)=> a.userId === myId));
-    }
+    if (onlyMine && myId) list = list.filter(t => t.assignees?.some((a:any)=> a.userId === myId));
     if (filterText.trim()) {
       const q = filterText.trim().toLowerCase();
       list = list.filter(t =>
@@ -289,12 +549,8 @@ function TasksTab({ teamId }: { teamId: string }) {
         (t.description || "").toLowerCase().includes(q)
       );
     }
-    if (filterStatus !== "ALL") {
-      list = list.filter(t => t.status === filterStatus);
-    }
-    if (filterAssignee !== "ALL") {
-      list = list.filter(t => t.assignees?.some((a:any)=> a.userId === filterAssignee));
-    }
+    if (filterStatus !== "ALL") list = list.filter(t => t.status === filterStatus);
+    if (filterAssignee !== "ALL") list = list.filter(t => t.assignees?.some((a:any)=> a.userId === filterAssignee));
     if (filterFrom) {
       const from = dayjs(filterFrom);
       list = list.filter(t => t.dueDate ? dayjs(t.dueDate).isSame(from, "minute") || dayjs(t.dueDate).isAfter(from) : false);
@@ -303,31 +559,22 @@ function TasksTab({ teamId }: { teamId: string }) {
       const to = dayjs(filterTo);
       list = list.filter(t => t.dueDate ? dayjs(t.dueDate).isSame(to, "minute") || dayjs(t.dueDate).isBefore(to) : false);
     }
-    if (filterOverdue) {
-      list = list.filter(t => isOverdue(t));
-    }
-    if (filterSoon) {
-      list = list.filter(t => isDueSoon(t));
-    }
-
+    if (filterOverdue) list = list.filter(t => isOverdue(t));
+    if (filterSoon) list = list.filter(t => isDueSoon(t));
     return list;
   }, [tasks, onlyMine, myId, filterText, filterStatus, filterAssignee, filterFrom, filterTo, filterOverdue, filterSoon]);
 
-  // group by status
   const grouped: Record<StatusKey, any[]> = { TODO: [], IN_PROGRESS: [], BLOCKED: [], DONE: [] };
   for (const t of filteredTasks) grouped[t.status as StatusKey]?.push(t);
-  // sort by due date (nulls last)
-  for (const k of Object.keys(grouped) as StatusKey[]) {
+  (Object.keys(grouped) as StatusKey[]).forEach(k => {
     grouped[k].sort((a:any, b:any) => {
       const da = a.dueDate ? dayjs(a.dueDate).valueOf() : Number.POSITIVE_INFINITY;
       const db = b.dueDate ? dayjs(b.dueDate).valueOf() : Number.POSITIVE_INFINITY;
       return da - db;
     });
-  }
+  });
 
   const isMine = (t: any) => !!myId && t.assignees?.some((a: any) => a.userId === myId);
-
-  /* ------------------------------ Render -------------------------------- */
 
   const filterCount =
     (onlyMine ? 1 : 0) +
@@ -338,6 +585,16 @@ function TasksTab({ teamId }: { teamId: string }) {
     (filterTo ? 1 : 0) +
     (filterOverdue ? 1 : 0) +
     (filterSoon ? 1 : 0);
+
+  // modal for tasks (shared with calendar)
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalTask, setModalTask] = useState<any | null>(null);
+  const openTaskModal = (t:any) => { setModalTask(t); setModalOpen(true); };
+  const closeTaskModal = () => { setModalOpen(false); setModalTask(null); };
+
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+
+  /* ------------------------------ Render -------------------------------- */
 
   return (
     <>
@@ -384,7 +641,7 @@ function TasksTab({ teamId }: { teamId: string }) {
         </div>
       )}
 
-      {/* Filters (compact header + collapsible content) */}
+      {/* Filters */}
       <Collapsible
         open={filtersOpen}
         setOpen={setFiltersOpen}
@@ -443,40 +700,50 @@ function TasksTab({ teamId }: { teamId: string }) {
         </div>
       </Collapsible>
 
-      {/* Kanban: each column is its own scroll view */}
-      <div className="grid md:grid-cols-4 gap-4">
+      {/* Kanban */}
+      <div ref={boardRef} className="grid md:grid-cols-4 gap-4">
         {STATUS.map((col) => {
           const items = grouped[col.key] || [];
           return (
             <section
               key={col.key}
-              className="flex flex-col rounded-2xl border bg-white shadow-sm"
-              style={{
-                maxHeight: "calc(100vh - 260px)",
-                minHeight: "520px",
-              }}
+              className="flex flex-col rounded-2xl border bg-white shadow-sm overflow-hidden"
+              style={{ height: colH }}
             >
-              <header className="sticky top-0 z-10 bg-white/85 backdrop-blur border-b px-4 py-2">
-                <h3 className="text-lg font-semibold text-slate-700">{col.label}</h3>
+              <header className="shrink-0 sticky top-0 z-10 bg-white/90 backdrop-blur border-b px-4 py-2">
+                <h3 className="text-lg font-semibold text-slate-700">
+                  {col.label} <span className="ml-1 text-slate-400 text-sm">({items.length})</span>
+                </h3>
               </header>
 
-              <div className="flex-1 overflow-y-auto p-3 space-y-3">
-                {items.map((t: any) => {
-                  const overdue = isOverdue(t);
-                  const soon = isDueSoon(t);
-                  return (
-                    <div
-                      key={t.id}
-                      className={`rounded-2xl border bg-white p-4 shadow-sm group ${
-                        isMine(t) ? "ring-2 ring-indigo-300" : ""
-                      }`}
-                    >
-                      <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto] sm:items-start">
+              <div className="flex-1 overflow-hidden">
+                <div
+                  className="h-full overflow-y-auto px-3 pr-6 pt-3 pb-5 space-y-3"
+                  style={{ scrollbarGutter: "stable both-edges", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}
+                >
+                  {!items.length && (
+                    <div className="text-sm text-slate-500 px-2 py-6 text-center">
+                      No tasks here yet.
+                    </div>
+                  )}
+
+                  {items.map((t: any) => {
+                    const overdue = isOverdue(t);
+                    const soon = isDueSoon(t);
+                    const title = (t.title || "").trim() || "Untitled task";
+                    return (
+                      <article
+                        key={t.id}
+                        className={`rounded-2xl border bg-white p-4 shadow-sm transition overflow-hidden cursor-pointer ${
+                          isMine(t) ? "ring-2 ring-indigo-300" : "hover:shadow-md"
+                        }`}
+                        onClick={()=>openTaskModal(t)}
+                      >
                         <div className="min-w-0">
-                          <div className="flex items-center gap-3">
-                            <div className="font-semibold leading-6 truncate" title={t.title}>
-                              {t.title}
-                            </div>
+                          <div className="flex items-center gap-2 min-w-0">
+                            <h4 className="font-semibold leading-6 truncate" title={title}>
+                              {title}
+                            </h4>
                             {overdue && (
                               <span className="shrink-0 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
                                 Overdue
@@ -490,159 +757,133 @@ function TasksTab({ teamId }: { teamId: string }) {
                           </div>
 
                           {t.description && (
-                            <div className="mt-1 text-sm text-slate-700 whitespace-pre-wrap break-words line-clamp-3">
+                            <p className="mt-1 text-sm text-slate-700 whitespace-pre-wrap break-words line-clamp-3">
                               {t.description}
-                            </div>
+                            </p>
                           )}
 
                           {t.dueDate && (
-                            <div className="mt-1 text-xs">
+                            <div className="mt-1 text-xs whitespace-nowrap">
                               <span className="font-medium text-slate-600">Due:</span>{" "}
-                              <span
-                                className={
-                                  overdue
-                                    ? "text-rose-700 font-medium"
-                                    : soon
-                                    ? "text-amber-700 font-medium"
-                                    : "text-slate-700"
-                                }
-                              >
+                              <span className={overdue ? "text-rose-700 font-medium" : soon ? "text-amber-700 font-medium" : "text-slate-700"}>
                                 {dayjs(t.dueDate).format("MMM D, YYYY HH:mm")}
                               </span>
                             </div>
                           )}
                         </div>
 
-                        <select
-                          className="select sm:justify-self-end"
-                          defaultValue={t.status}
-                          onChange={(e) => updateStatus(t.id, e.target.value as StatusKey)}
-                        >
-                          {STATUS.map((s) => (
-                            <option key={s.key} value={s.key}>
-                              {s.label}
-                            </option>
-                          ))}
-                        </select>
-
-                        {perms?.canWriteAll && (
-                          <button
-                            className="btn-outline sm:justify-self-end shrink-0 opacity-0 group-hover:opacity-100"
-                            title="Delete task"
-                            onClick={() => deleteTask(t.id)}
-                          >
-                            🗑
-                          </button>
-                        )}
-                      </div>
-
-                      {/* Assignees */}
-                      <div className="mt-3 text-sm text-slate-700">
-                        <div className="font-medium mb-1">Assigned</div>
-                        {t.assignees?.length ? (
-                          <div className="flex flex-wrap gap-2">
-                            {t.assignees.map((a: any) => (
-                              <span
-                                key={a.userId}
-                                className="inline-flex items-center gap-2 rounded-full border px-2 py-0.5"
-                              >
-                                {nameById.get(a.userId) || a.userId}
-                                {perms?.canAssign && (
-                                  <button
-                                    className="text-slate-500 hover:text-slate-800"
-                                    title="Unassign"
-                                    onClick={() => unassign(t.id, a.userId)}
-                                  >
-                                    ×
-                                  </button>
-                                )}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <span className="text-slate-500">none</span>
-                        )}
-                      </div>
-
-                      {/* Assign */}
-                      {perms?.canAssign && (
-                        <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
+                        <div className="mt-3 grid gap-2" onClick={stop}>
                           <select
                             className="select w-full"
-                            value={assignPick[t.id] || ""}
-                            onChange={(e) =>
-                              setAssignPick((s) => ({ ...s, [t.id]: e.target.value }))
-                            }
+                            defaultValue={t.status}
+                            onChange={(e) => updateStatus(t.id, e.target.value as StatusKey)}
+                            title="Update status"
+                            onClick={stop}
                           >
-                            <option value="" disabled>
-                              Assign to…
-                            </option>
-                            {members?.map((m: any) => (
-                              <option key={m.userId} value={m.userId}>
-                                {m.name || m.handle || m.userId}{" "}
-                                {m.role === "LEADER" ? "• LEAD" : ""}
-                              </option>
+                            {STATUS.map((s) => (
+                              <option key={s.key} value={s.key}>{s.label}</option>
                             ))}
                           </select>
-                          <button className="btn w-full sm:w-auto" onClick={() => assign(t.id)}>
-                            Assign
-                          </button>
+
+                          {perms?.canWriteAll && (
+                            <div className="flex gap-2">
+                              <button className="btn-outline w-full" title="Edit" onClick={()=>openTaskModal(t)}>Edit</button>
+                              <button className="btn-outline w-full" title="Delete" onClick={(e)=>{ stop(e); deleteTask(t.id); }}>Delete</button>
+                            </div>
+                          )}
                         </div>
-                      )}
 
-                      {/* Notes compact toggle */}
-                      <div className="mt-3">
-                        <button
-                          className="btn-outline w-full justify-between"
-                          onClick={() =>
-                            setOpenNotes((s) => ({ ...s, [t.id]: !s[t.id] }))
-                          }
-                        >
-                          <span>Notes ({t.notes?.length || 0})</span>
-                          <span className="ml-2">{openNotes[t.id] ? "▲" : "▼"}</span>
-                        </button>
+                        <div className="mt-3 text-sm text-slate-700" onClick={stop}>
+                          <div className="font-medium mb-1">Assigned</div>
+                          {t.assignees?.length ? (
+                            <div className="flex flex-wrap gap-2">
+                              {t.assignees.map((a: any) => (
+                                <span key={a.userId} className="inline-flex items-center gap-2 rounded-full border px-2 py-0.5">
+                                  {nameById.get(a.userId) || a.userId}
+                                  {perms?.canAssign && (
+                                    <button className="text-slate-500 hover:text-slate-800" title="Unassign" onClick={(e)=>{ stop(e); unassign(t.id, a.userId); }}>×</button>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          ) : <span className="text-slate-500">none</span>}
+                        </div>
 
-                        {openNotes[t.id] && (
-                          <div className="mt-2 space-y-2 max-h-40 overflow-auto pr-1">
-                            {t.notes?.length ? (
-                              t.notes.map((n: any) => (
-                                <div key={n.id} className="note text-sm">
-                                  {highlightMentions(n.content)}
-                                  <div className="text-xs text-slate-500 mt-1">
-                                    {dayjs(n.createdAt).format("MMM D, HH:mm")}
-                                  </div>
-                                </div>
-                              ))
-                            ) : (
-                              <div className="text-xs text-slate-500">No notes yet.</div>
-                            )}
+                        {perms?.canAssign && (
+                          <div className="mt-2 grid gap-2" onClick={stop}>
+                            <select
+                              className="select w-full"
+                              value={assignPick[t.id] || ""}
+                              onChange={(e) => setAssignPick((s) => ({ ...s, [t.id]: e.target.value }))}
+                              onClick={stop}
+                            >
+                              <option value="" disabled>Assign to…</option>
+                              {members?.map((m: any) => (
+                                <option key={m.userId} value={m.userId}>
+                                  {m.name || m.handle || m.userId} {m.role === "LEADER" ? "• LEAD" : ""}
+                                </option>
+                              ))}
+                            </select>
+                            <button className="btn w-full" onClick={(e)=>{ stop(e); assign(t.id); }}>
+                              Assign
+                            </button>
                           </div>
                         )}
 
-                        {/* Add note inline */}
-                        <div className="mt-2 grid grid-cols-[1fr_auto] gap-2">
-                          <input
-                            className="input w-full"
-                            placeholder="Add note (use @handle)"
-                            value={noteText[t.id] || ""}
-                            onChange={(e) =>
-                              setNoteText((s) => ({ ...s, [t.id]: e.target.value }))
-                            }
-                            onKeyDown={(e) => e.key === "Enter" && addNote(t.id)}
-                          />
-                          <button className="btn w-full sm:w-auto" onClick={() => addNote(t.id)}>
-                            Post
+                        <div className="mt-3" onClick={stop}>
+                          <button className="btn-outline w-full justify-between" onClick={(e)=>{ stop(e); setOpenNotes((s) => ({ ...s, [t.id]: !s[t.id] })); }}>
+                            <span>Notes ({t.notes?.length || 0})</span>
+                            <span className="ml-2">{openNotes[t.id] ? "▲" : "▼"}</span>
                           </button>
+
+                          {openNotes[t.id] && (
+                            <div className="mt-2 space-y-2 max-h-40 overflow-auto pr-1">
+                              {t.notes?.length ? (
+                                t.notes.map((n: any) => (
+                                  <div key={n.id} className="note text-sm">
+                                    {highlightMentions(n.content)}
+                                    <div className="text-xs text-slate-500 mt-1">
+                                      {dayjs(n.createdAt).format("MMM D, HH:mm")}
+                                    </div>
+                                  </div>
+                                ))
+                              ) : <div className="text-xs text-slate-500">No notes yet.</div>}
+                            </div>
+                          )}
+
+                          <div className="mt-2 grid gap-2">
+                            <input
+                              className="input w-full"
+                              placeholder="Add note (use @handle)"
+                              value={noteText[t.id] || ""}
+                              onChange={(e) => setNoteText((s) => ({ ...s, [t.id]: e.target.value }))}
+                              onKeyDown={(e) => e.key === "Enter" && addNote(t.id)}
+                              onClick={stop}
+                            />
+                            <button className="btn w-full" onClick={(e)=>{ stop(e); addNote(t.id); }}>
+                              Post
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                      </article>
+                    );
+                  })}
+                </div>
               </div>
             </section>
           );
         })}
       </div>
+
+      {modalOpen && modalTask && (
+        <TaskModal
+          task={modalTask}
+          teamId={teamId}
+          perms={perms}
+          members={members}
+          onClose={closeTaskModal}
+        />
+      )}
     </>
   );
 }
@@ -662,14 +903,12 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
 
   const { data: me } = useQuery({ queryKey:["me"], queryFn: async()=> (await api.get("/me")).data });
 
-  // use tasks as the single source of truth (deadline = task.dueDate)
   const { data: tasks } = useQuery({
     queryKey: ["tasks", teamId],
     queryFn: async () => (await api.get(`/teams/${teamId}/tasks`)).data,
     enabled: !!teamId,
   });
 
-  // need members for assignee filter
   const { data: members } = useQuery({
     queryKey: ["members", teamId],
     queryFn: async () => (await api.get(`/teams/${teamId}/members`)).data,
@@ -679,7 +918,6 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
   const [view, setView] = useState<CalView>("month");
   const [cursor, setCursor] = useState<dayjs.Dayjs>(dayjs());
 
-  // filters
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [onlyMine, setOnlyMine] = useState(false);
   const [filterText, setFilterText] = useState("");
@@ -691,7 +929,6 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
 
   const myId = me?.id;
 
-  // filter tasks first, then map to deadlines
   const filteredTasks = useMemo(() => {
     let list = (tasks || []) as any[];
     if (onlyMine && myId) {
@@ -741,24 +978,11 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
   }
   function today() { setCursor(dayjs()); }
 
-  // modal for details
   const [open, setOpen] = useState(false);
   const [activeTask, setActiveTask] = useState<any | null>(null);
-  const [newNote, setNewNote] = useState("");
 
-  function openModal(task: any) { setActiveTask(task); setNewNote(""); setOpen(true); }
+  function openModal(task: any) { setActiveTask(task); setOpen(true); }
   function closeModal() { setOpen(false); setActiveTask(null); }
-
-  async function addNoteToActive() {
-    if (!activeTask) return;
-    const text = newNote.trim();
-    if (!text) return;
-    await api.post(`/tasks/${activeTask.id}/notes`, { content: text });
-    setNewNote("");
-    await qc.invalidateQueries({ queryKey: ["tasks", teamId] });
-    const updated = (await api.get(`/teams/${teamId}/tasks`)).data.find((t:any)=> t.id === activeTask.id);
-    if (updated) setActiveTask(updated);
-  }
 
   const filterCount =
     (onlyMine ? 1 : 0) +
@@ -769,9 +993,11 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
     (filterOverdue ? 1 : 0) +
     (filterSoon ? 1 : 0);
 
+  const calRef = useRef<HTMLDivElement>(null);
+  const calH = useFitToViewport(calRef, 24);
+
   return (
     <div className="space-y-4">
-      {/* Toolbar */}
       <div className="rounded-2xl border bg-white shadow-sm p-3 flex flex-wrap items-center gap-2">
         <div className="flex gap-2">
           <button className="btn-outline" onClick={today}>Today</button>
@@ -803,7 +1029,6 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
         </div>
       </div>
 
-      {/* Filters */}
       {filtersOpen && (
         <div className="rounded-2xl border bg-white shadow-sm p-3 space-y-3">
           <div className="grid gap-2 md:grid-cols-6">
@@ -848,97 +1073,36 @@ function DeadlinesTab({ teamId }: { teamId: string }) {
         </div>
       )}
 
-      {/* Calendar-like views */}
-      <div className="card">
-        {view === "day"   && <DayGrid   date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
-        {view === "week"  && <WeekGrid  date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
-        {view === "month" && <MonthGrid date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
-        {view === "year"  && <YearGrid  date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
-      </div>
-
-      {/* Modal: task details + notes */}
-      {open && activeTask && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/30" onClick={closeModal} />
-          <div className="relative z-10 w-[min(720px,92vw)] rounded-2xl border bg-white p-5 shadow-xl" role="dialog" aria-modal="true">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <h3 className="text-lg font-semibold truncate">{activeTask.title}</h3>
-                <div className="mt-1 text-sm text-slate-600">
-                  Status: <span className="font-medium">{activeTask.status}</span>
-                  {activeTask.dueDate && (
-                    <>
-                      {" · "}Deadline: {dayjs(activeTask.dueDate).format("MMM D, YYYY HH:mm")}
-                    </>
-                  )}
-                </div>
-                <div className="mt-1 flex gap-2">
-                  {isOverdue(activeTask) && (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">Overdue</span>
-                  )}
-                  {isDueSoon(activeTask) && !isOverdue(activeTask) && (
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-800">Due soon</span>
-                  )}
-                </div>
-              </div>
-              <button className="btn-outline" onClick={closeModal}>Close</button>
-            </div>
-
-            {activeTask.description && (
-              <div className="mt-3 text-slate-800">{activeTask.description}</div>
-            )}
-
-            <div className="mt-4">
-              <div className="font-medium mb-1 text-sm">Assignees</div>
-              {activeTask.assignees?.length ? (
-                <div className="flex flex-wrap gap-2 text-sm">
-                  {activeTask.assignees.map((a:any)=>(
-                    <span key={a.userId} className="rounded-full border px-2 py-0.5">
-                      {a.user?.name || a.user?.handle || a.userId}
-                    </span>
-                  ))}
-                </div>
-              ) : <div className="text-sm text-slate-500">None</div>}
-            </div>
-
-            {/* Notes in modal */}
-            <div className="mt-5">
-              <div className="font-semibold">Notes</div>
-              <div className="mt-2 space-y-2 max-h-48 overflow-auto pr-1">
-                {activeTask.notes?.length ? (
-                  activeTask.notes.map((n:any)=> (
-                    <div key={n.id} className="note text-sm">
-                      {highlightMentions(n.content)}
-                      <div className="text-xs text-slate-500 mt-1">
-                        {dayjs(n.createdAt).format("MMM D, HH:mm")}
-                      </div>
-                    </div>
-                  ))
-                ) : (
-                  <div className="text-sm text-slate-500">No notes yet.</div>
-                )}
-              </div>
-
-              <div className="mt-3 grid grid-cols-[1fr_auto] gap-2">
-                <input
-                  className="input"
-                  placeholder="Add note (use @handle)"
-                  value={newNote}
-                  onChange={(e)=>setNewNote(e.target.value)}
-                  onKeyDown={(e)=> e.key === "Enter" && addNoteToActive()}
-                />
-                <button className="btn" onClick={addNoteToActive}>Post</button>
-              </div>
-            </div>
-          </div>
+      <section
+        ref={calRef}
+        className="rounded-2xl border bg-white shadow-sm overflow-hidden"
+        style={{ height: calH }}
+      >
+        <div
+          className="h-full overflow-auto p-3"
+          style={{ scrollbarGutter: "stable both-edges", WebkitOverflowScrolling: "touch", overscrollBehavior: "contain" }}
+        >
+          {view === "day"   && <DayGrid   date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
+          {view === "week"  && <WeekGrid  date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
+          {view === "month" && <MonthGrid date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
+          {view === "year"  && <YearGrid  date={cursor} events={deadlines} onPick={t=>openModal(t)} />}
         </div>
+      </section>
+
+      {open && activeTask && (
+        <TaskModal
+          task={activeTask}
+          teamId={teamId}
+          perms={perms}
+          members={members}
+          onClose={closeModal}
+        />
       )}
     </div>
   );
 }
 
-/* Calendar renderers (super lightweight)
-   Expect events: { id, title, startAt, endAt, task } and call onPick(task) */
+/* Calendar renderers (unchanged, but using calChipClasses/dayCardClasses) */
 
 function MonthGrid({ date, events, onPick }:{
   date:Dayjs; events:any[]; onPick:(task:any)=>void
@@ -952,10 +1116,7 @@ function MonthGrid({ date, events, onPick }:{
       </div>
       <div className="grid grid-cols-7 gap-1">
         {days.map(d=>{
-          const dayEvents = events.filter((e:any)=>{
-            const s = dayjs(e.startAt);
-            return d.isSame(s, "day");
-          }).slice(0,4);
+          const dayEvents = events.filter((e:any)=> d.isSame(dayjs(e.startAt), "day")).slice(0,4);
           const muted = d.month()!==date.month();
           return (
             <div key={d.toString()} className={`border rounded-xl p-2 min-h-[96px] ${muted?"bg-slate-50 text-slate-400":""}`}>
@@ -964,7 +1125,7 @@ function MonthGrid({ date, events, onPick }:{
                 {dayEvents.map((e:any)=>(
                   <button
                     key={e.id}
-                    className="w-full text-left text-xs truncate px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200"
+                    className={calChipClasses(e.task)}
                     onClick={()=>onPick(e.task)}
                     title={e.title}
                   >
@@ -998,7 +1159,7 @@ function WeekGrid({ date, events, onPick }:{
               {dayEvents.length ? dayEvents.map((e:any)=>(
                 <button
                   key={e.id}
-                  className="w-full text-left text-xs truncate px-2 py-0.5 rounded bg-slate-100 mb-1 hover:bg-slate-200"
+                  className={calChipClasses(e.task)}
                   onClick={()=>onPick(e.task)}
                   title={e.title}
                 >
@@ -1024,7 +1185,7 @@ function DayGrid({ date, events, onPick }:{
       {dayEvents.length ? dayEvents.map((e:any)=>(
         <button
           key={e.id}
-          className="w-full text-left border rounded-xl p-3 hover:bg-slate-50"
+          className={dayCardClasses(e.task)}
           onClick={()=>onPick(e.task)}
           title={e.title}
         >
@@ -1055,31 +1216,28 @@ function YearGrid({ date, events, onPick }:{
 }
 
 /* ================================ INFO ================================= */
+
 function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=>void }) {
   const qc = useQueryClient();
 
-  // 1) fetch team (gives us orgId + name)
   const { data: team } = useQuery({
     queryKey: ["team", teamId],
     queryFn: async () => (await api.get(`/teams/${teamId}`)).data,
     enabled: !!teamId,
   });
 
-  // 2) team members (for roster + roles)
   const { data: members } = useQuery({
     queryKey: ["members", teamId],
     queryFn: async () => (await api.get(`/teams/${teamId}/members`)).data,
     enabled: !!teamId,
   });
 
-  // 3) permissions (who can manage)
   const { data: perms } = useQuery<Perms>({
     queryKey: ["perms", teamId],
     queryFn: async () => (await api.get(`/teams/${teamId}/permissions`)).data,
     enabled: !!teamId,
   });
 
-  // 4) **org members** for the searchable dropdown
   const orgId = team?.orgId;
   const { data: orgMembers, error: orgMembersErr } = useQuery({
     queryKey: ["orgMembers-for-info", orgId],
@@ -1117,13 +1275,11 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
     enabled: !!teamId,
   });
 
-  /* ---- Team info text ---- */
   const saveInfo = useMutation({
     mutationFn: async (info: string) => (await api.patch(`/teams/${teamId}/info`, { info })).data,
     onSuccess: () => refetchInfo()
   });
 
-  /* ---- Links CRUD ---- */
   const addLink = useMutation({
     mutationFn: async ({ label, url }: {label:string; url:string}) =>
       (await api.post(`/teams/${teamId}/links`, { label, url })).data,
@@ -1141,7 +1297,6 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
     onSuccess: () => refetchInfo()
   });
 
-  // --- Searchable combobox state
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<{userId:string; label:string} | null>(null);
@@ -1163,7 +1318,6 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
 
   return (
     <div className="space-y-6">
-      {/* Rename team (admins + leaders) */}
       <div className="card">
         <h3 className="font-semibold mb-2">Team details</h3>
         <div className="flex flex-wrap items-center gap-2">
@@ -1189,7 +1343,6 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
         </div>
       </div>
 
-      {/* Team info */}
       <div className="card">
         <h3 className="font-semibold mb-2">Team info</h3>
         <textarea
@@ -1214,7 +1367,6 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
         )}
       </div>
 
-      {/* Useful links */}
       <div className="card">
         <div className="flex items-center justify-between">
           <h3 className="font-semibold">Useful links</h3>
@@ -1264,14 +1416,12 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
         </ul>
       </div>
 
-      {/* Members management */}
       <div className="card relative">
         <div className="flex items-center justify-between gap-3">
           <h3 className="font-semibold">Team members</h3>
 
           {perms?.canWriteAll && (
             <div className="w-full max-w-md flex gap-2">
-              {/* Combobox input */}
               <div className="relative flex-1">
                 <input
                   className="input w-full"
@@ -1304,7 +1454,6 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
                 )}
               </div>
 
-              {/* Button */}
               <button
                 className="btn"
                 disabled={!selected}

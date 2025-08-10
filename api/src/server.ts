@@ -25,7 +25,6 @@ if (process.env.NODE_ENV !== "production") {
 }
 
 /* --------------------------------- Auth --------------------------------- */
-// Google SSO (Passport) — login only
 app.get("/auth/google/start", passport.authenticate("google", { scope: ["profile", "email"] }));
 app.get(
   "/auth/google/callback",
@@ -177,6 +176,81 @@ app.post("/orgs/join", async (req: any, res) => {
   res.json({ ok: true, orgId: jc.orgId });
 });
 
+
+/* ----------------------- Org delete + leave endpoints ------------------- */
+
+// Delete an organization (ADMIN only)
+app.delete("/orgs/:orgId", async (req: any, res: any, next: any) => {
+  try {
+    const uid = requireUser(req, res); if (!uid) return;
+    const { orgId } = req.params;
+
+    if (!(await requireOrgRole(orgId, uid, ["ADMIN"]))) return res.sendStatus(403);
+    const org = await prisma.organization.findUnique({ where: { id: orgId } });
+    if (!org) return res.sendStatus(404);
+
+    // Find teams under the org
+    const teams = await prisma.team.findMany({ where: { orgId }, select: { id: true } });
+    const teamIds = teams.map(t => t.id);
+
+    // Gather tasks & notes under those teams
+    const tasks = teamIds.length
+      ? await prisma.task.findMany({ where: { teamId: { in: teamIds } }, select: { id: true } })
+      : [];
+    const taskIds = tasks.map(t => t.id);
+
+    const notes = taskIds.length
+      ? await prisma.taskNote.findMany({ where: { taskId: { in: taskIds } }, select: { id: true } })
+      : [];
+    const noteIds = notes.map(n => n.id);
+
+    // Build cascaded deletes
+    const ops: any[] = [];
+    if (noteIds.length) ops.push(prisma.taskNoteMention.deleteMany({ where: { noteId: { in: noteIds } } }));
+    if (taskIds.length) ops.push(prisma.taskNote.deleteMany({ where: { taskId: { in: taskIds } } }));
+    if (taskIds.length) ops.push(prisma.taskAssignment.deleteMany({ where: { taskId: { in: taskIds } } }));
+    if (teamIds.length) ops.push(prisma.calendarEvent.deleteMany({ where: { teamId: { in: teamIds } } }));
+    if (taskIds.length) ops.push(prisma.task.deleteMany({ where: { id: { in: taskIds } } }));
+
+    if (teamIds.length) ops.push(prisma.goal.deleteMany({ where: { teamId: { in: teamIds } } }));
+    if (teamIds.length) ops.push(prisma.teamLink.deleteMany({ where: { teamId: { in: teamIds } } }));
+    if (teamIds.length) ops.push(prisma.teamJoinCode.deleteMany({ where: { teamId: { in: teamIds } } }));
+    if (teamIds.length) ops.push(prisma.teamMembership.deleteMany({ where: { teamId: { in: teamIds } } }));
+    if (teamIds.length) ops.push(prisma.team.deleteMany({ where: { id: { in: teamIds } } }));
+
+    ops.push(prisma.orgJoinCode.deleteMany({ where: { orgId } }));
+    ops.push(prisma.orgMembership.deleteMany({ where: { orgId } }));
+    ops.push(prisma.organization.delete({ where: { id: orgId } }));
+
+    await prisma.$transaction(ops);
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Leave an organization (non-admin members)
+app.delete("/orgs/:orgId/leave", async (req: any, res: any) => {
+  const uid = requireUser(req, res); if (!uid) return;
+  const { orgId } = req.params;
+
+  const membership = await prisma.orgMembership.findUnique({
+    where: { orgId_userId: { orgId, userId: uid } }
+  });
+  if (!membership) return res.sendStatus(404);
+  if (membership.role === "ADMIN") {
+    return res.status(400).json({ error: "cannot_leave_admin" });
+  }
+
+  // Remove any team memberships within this org for this user
+  await prisma.$transaction([
+    prisma.teamMembership.deleteMany({ where: { userId: uid, team: { orgId } } }),
+    prisma.orgMembership.delete({ where: { orgId_userId: { orgId, userId: uid } } })
+  ]);
+
+  res.json({ ok: true });
+});
+
 /* ----------------------------- Team CRUD bits --------------------------- */
 app.delete("/teams/:teamId", async (req: any, res: any, next: any) => {
   try {
@@ -311,7 +385,6 @@ app.delete("/tasks/:taskId/assignees/:userId", async (req: any, res) => {
   await prisma.taskAssignment.deleteMany({ where: { taskId, userId } });
   res.json({ ok: true });
 });
-// Delete a task (admins/leaders only)
 app.delete("/tasks/:taskId", async (req: any, res: any, next: any) => {
   try {
     const uid = requireUser(req, res); if (!uid) return;
@@ -322,15 +395,10 @@ app.delete("/tasks/:taskId", async (req: any, res: any, next: any) => {
     });
     if (!task) return res.sendStatus(404);
 
-    // Only org ADMIN or team LEADER may delete tasks
     const can = await canWriteTeam(task.teamId, uid);
     if (!can) return res.sendStatus(403);
 
-    // Cascade deletes: mentions -> notes -> assignments -> calendar events -> task
-    const notes = await prisma.taskNote.findMany({
-      where: { taskId: task.id },
-      select: { id: true },
-    });
+    const notes = await prisma.taskNote.findMany({ where: { taskId: task.id }, select: { id: true } });
     const noteIds = notes.map(n => n.id);
 
     await prisma.$transaction([
@@ -345,6 +413,105 @@ app.delete("/tasks/:taskId", async (req: any, res: any, next: any) => {
   } catch (err) {
     next(err);
   }
+});
+
+/* ----------------------------- Org admin API ---------------------------- */
+// Basic org info (used by UI fallback)
+app.get("/orgs/:orgId", async (req: any, res) => {
+  const uid = requireUser(req, res); if (!uid) return;
+  const { orgId } = req.params;
+  const member = await prisma.orgMembership.findUnique({ where: { orgId_userId: { orgId, userId: uid } } });
+  if (!member) return res.sendStatus(403);
+
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+  if (!org) return res.sendStatus(404);
+
+  const memberCount = await prisma.orgMembership.count({ where: { orgId } });
+  res.json({ id: org.id, name: org.name, memberCount });
+});
+
+// Full members list (admin only)
+app.get("/orgs/:orgId/members", async (req: any, res) => {
+  const uid = requireUser(req, res); if (!uid) return;
+  const { orgId } = req.params;
+  if (!(await requireOrgRole(orgId, uid, ["ADMIN"]))) return res.sendStatus(403);
+
+  const rows = await prisma.orgMembership.findMany({
+    where: { orgId },
+    include: { user: true },
+    orderBy: [{ role: "desc" }, { userId: "asc" }], // no createdAt on orgMembership
+  });
+  res.json(rows.map(r => ({
+    userId: r.userId,
+    name: r.user.name,
+    handle: r.user.handle,
+    role: r.role
+  })));
+});
+
+// Alias for compatibility with the client fallback
+app.get("/orgs/:orgId/users", async (req, res, next) =>
+  (app as any)._router.handle({ ...req, url: `/orgs/${req.params.orgId}/members`, method: "GET" }, res, next)
+);
+
+// Update org role (admin only)
+app.patch("/orgs/:orgId/members/:userId", async (req: any, res) => {
+  const uid = requireUser(req, res); if (!uid) return;
+  const { orgId, userId } = req.params;
+  const { role } = req.body as { role: "ADMIN" | "MEMBER" };
+  if (!(await requireOrgRole(orgId, uid, ["ADMIN"]))) return res.sendStatus(403);
+  if (role !== "ADMIN" && role !== "MEMBER") return res.status(400).json({ error: "invalid_role" });
+
+  const updated = await prisma.orgMembership.update({
+    where: { orgId_userId: { orgId, userId } },
+    data: { role }
+  }).catch(() => null);
+  if (!updated) return res.sendStatus(404);
+  res.json(updated);
+});
+
+// Remove from org (admin only; block removing admins)
+app.delete("/orgs/:orgId/members/:userId", async (req: any, res) => {
+  const uid = requireUser(req, res); if (!uid) return;
+  const { orgId, userId } = req.params;
+  if (!(await requireOrgRole(orgId, uid, ["ADMIN"]))) return res.sendStatus(403);
+
+  const target = await prisma.orgMembership.findUnique({ where: { orgId_userId: { orgId, userId } } });
+  if (!target) return res.sendStatus(404);
+  if (target.role === "ADMIN") return res.status(400).json({ error: "cannot_remove_admin" });
+
+  await prisma.orgMembership.delete({ where: { orgId_userId: { orgId, userId } } });
+  res.json({ ok: true });
+});
+
+// Optional: rich details (works with older clients)
+app.get("/orgs/:orgId/details", async (req: any, res) => {
+  const uid = requireUser(req, res); if (!uid) return;
+  const { orgId } = req.params;
+  if (!(await requireOrgRole(orgId, uid, ["ADMIN"]))) return res.sendStatus(403);
+
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+  if (!org) return res.sendStatus(404);
+
+  const [memberCount, teams] = await Promise.all([
+    prisma.orgMembership.count({ where: { orgId } }),
+    prisma.team.findMany({
+      where: { orgId },
+      include: { memberships: { include: { user: true } } },
+      orderBy: { name: "asc" }
+    })
+  ]);
+
+  const shapedTeams = teams.map(t => ({
+    id: t.id,
+    name: t.name,
+    leaders: t.memberships.filter(m => m.role === "LEADER")
+      .map(m => ({ userId: m.userId, name: m.user.name, handle: m.user.handle })),
+    members: t.memberships.filter(m => m.role === "MEMBER")
+      .map(m => ({ userId: m.userId, name: m.user.name, handle: m.user.handle }))
+  }));
+
+  res.json({ id: org.id, name: org.name, memberCount, teams: shapedTeams });
 });
 
 /* ---------------------------- Notes & Info ------------------------------ */
@@ -430,7 +597,6 @@ app.delete("/teams/:teamId/links/:linkId", async (req: any, res) => {
 });
 
 /* ----------------------------- Calendar API ----------------------------- */
-// (Pure app DB calendar — no Google sync)
 app.get("/teams/:teamId/calendar", async (req: any, res) => {
   const uid = requireUser(req, res); if (!uid) return;
   const { teamId } = req.params;
@@ -441,7 +607,6 @@ app.get("/teams/:teamId/calendar", async (req: any, res) => {
   const events = await prisma.calendarEvent.findMany({ where: { teamId } });
   res.json(events);
 });
-
 app.post("/teams/:teamId/calendar", async (req: any, res) => {
   const uid = requireUser(req, res); if (!uid) return;
   const { teamId } = req.params;
@@ -463,7 +628,6 @@ app.post("/teams/:teamId/calendar", async (req: any, res) => {
 
   res.json(created);
 });
-
 app.patch("/teams/:teamId/calendar/:eventId", async (req: any, res) => {
   const uid = requireUser(req, res); if (!uid) return;
   const { teamId, eventId } = req.params;
@@ -500,7 +664,6 @@ app.patch("/teams/:teamId/calendar/:eventId", async (req: any, res) => {
   const updated = await prisma.calendarEvent.update({ where: { id: eventId }, data });
   res.json(updated);
 });
-
 app.delete("/teams/:teamId/calendar/:eventId", async (req: any, res) => {
   const uid = requireUser(req, res); if (!uid) return;
   const { teamId, eventId } = req.params;

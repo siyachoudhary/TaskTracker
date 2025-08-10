@@ -17,3 +17,19 @@ body { @apply bg-slate-50 text-slate-900; }
 .ktask { @apply card p-3 mb-3; }
 .note { @apply bg-slate-50 border border-slate-200 rounded-xl p-2; }
 .mention { @apply text-indigo-600 font-medium; }
+.kcol-scroll-fix { padding-right: 14px; }
+
+
+.kanban-board {
+  display: flex;
+  height: calc(100vh - 10vh); /* Adjust for navbar/header height */
+  overflow: hidden;
+}
+
+.kanban-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto; /* scroll within column if content exceeds height */
+  min-height: 0; /* prevents flex children from overflowing */
+}
