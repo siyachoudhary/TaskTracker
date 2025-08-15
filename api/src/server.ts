@@ -376,6 +376,52 @@ app.post("/orgs/join", async (req: any, res) => {
 /* ------------------------------------------------------------------ */
 /* Org delete + leave                                                 */
 /* ------------------------------------------------------------------ */
+app.delete("/me", async (req: any, res: any, next: any) => {
+  try {
+    const uid = requireUser(req, res);
+    if (!uid) return;
+
+    const adminCount = await prisma.orgMembership.count({
+      where: { userId: uid, role: "ADMIN" as any },
+    });
+    if (adminCount > 0) return res.status(400).json({ error: "cannot_delete_admin" });
+
+    const GHOST_USER_ID = process.env.GHOST_USER_ID?.trim();
+
+    const ops: any[] = [
+      // --- hard deps that FK back to user ---
+      prisma.identity.deleteMany({ where: { userId: uid } }),            // <-- NEW
+      // if you have other auth tables, add them too:
+      // prisma.session.deleteMany({ where: { userId: uid } }),
+      // prisma.apiKey.deleteMany({ where: { userId: uid } }),
+      // prisma.notification.deleteMany({ where: { userId: uid } }),
+
+      // app-level relations
+      prisma.taskNoteMention.deleteMany({ where: { userId: uid } }),
+      prisma.taskAssignment.deleteMany({ where: { userId: uid } }),
+      prisma.teamMembership.deleteMany({ where: { userId: uid } }),
+      prisma.orgMembership.deleteMany({ where: { userId: uid } }),
+      prisma.taskNote.deleteMany({ where: { authorId: uid } }),
+    ];
+
+    if (GHOST_USER_ID) {
+      // reassign creator fields instead of nulling (for non-null columns)
+      ops.push(prisma.task.updateMany({ where: { createdBy: uid }, data: { createdBy: GHOST_USER_ID } }));
+      ops.push(prisma.team.updateMany({ where: { createdBy: uid }, data: { createdBy: GHOST_USER_ID } }));
+      ops.push(prisma.organization.updateMany({ where: { createdBy: uid }, data: { createdBy: GHOST_USER_ID } }));
+    }
+
+    // finally delete the user
+    ops.push(prisma.user.delete({ where: { id: uid } }));
+
+    await prisma.$transaction(ops);
+
+    res.clearCookie("token", cookieOpts());
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
 
 app.delete("/orgs/:orgId", async (req: any, res: any, next: any) => {
   try {
@@ -693,16 +739,30 @@ app.patch("/tasks/:taskId", async (req: any, res) => {
 app.post("/tasks/:taskId/assignees", async (req: any, res) => {
   const uid = requireUser(req, res);
   if (!uid) return;
+
   const task = await prisma.task.findUnique({
     where: { id: req.params.taskId },
     include: { team: true },
   });
   if (!task) return res.sendStatus(404);
+
+  // Acting user must have write permission
   if (!(await canWriteTeam(task.teamId, uid))) return res.sendStatus(403);
+
+  const targetUserId: string = req.body.userId;
+
+  // NEW: target must be a member of the task's team
+  const targetIsOnTeam = await prisma.teamMembership.findUnique({
+    where: { teamId_userId: { teamId: task.teamId, userId: targetUserId } },
+  });
+  if (!targetIsOnTeam) {
+    return res.status(400).json({ error: "user_not_in_team" });
+  }
+
   const row = await prisma.taskAssignment.upsert({
-    where: { taskId_userId: { taskId: task.id, userId: req.body.userId } },
+    where: { taskId_userId: { taskId: task.id, userId: targetUserId } },
     update: {},
-    create: { taskId: task.id, userId: req.body.userId },
+    create: { taskId: task.id, userId: targetUserId },
   });
   res.json(row);
 });
@@ -829,6 +889,7 @@ app.delete("/orgs/:orgId/members/:userId", async (req: any, res) => {
   const uid = requireUser(req, res);
   if (!uid) return;
   const { orgId, userId } = req.params;
+
   if (!(await requireOrgRole(orgId, uid, ["ADMIN"])))
     return res.sendStatus(403);
 
@@ -839,11 +900,28 @@ app.delete("/orgs/:orgId/members/:userId", async (req: any, res) => {
   if (target.role === "ADMIN")
     return res.status(400).json({ error: "cannot_remove_admin" });
 
-  await prisma.orgMembership.delete({
-    where: { orgId_userId: { orgId, userId } },
-  });
+  await prisma.$transaction([
+    // Remove from every team in this org
+    prisma.teamMembership.deleteMany({
+      where: { userId, team: { orgId } },
+    }),
+    // Remove any task assignments in this org
+    prisma.taskAssignment.deleteMany({
+      where: { userId, task: { team: { orgId } } },
+    }),
+    // (Optional) remove @mentions authored for tasks in this org
+    prisma.taskNoteMention.deleteMany({
+      where: { userId, note: { task: { team: { orgId } } } },
+    }),
+    // Finally, remove org membership
+    prisma.orgMembership.delete({
+      where: { orgId_userId: { orgId, userId } },
+    }),
+  ]);
+
   res.json({ ok: true });
 });
+
 
 app.get("/orgs/:orgId/details", async (req: any, res) => {
   const uid = requireUser(req, res);

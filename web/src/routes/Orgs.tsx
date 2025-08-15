@@ -1,8 +1,8 @@
 import type React from "react";
 import { useEffect, useMemo, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api } from "../api";
 import { Link, useNavigate } from "react-router-dom";
+import { api } from "../api";
 import { FluxLogo, FluxMarkWithWaves, FluxWaves } from "../components/FluxLogo";
 
 /* ------------------------------ Top nav -------------------------------- */
@@ -19,15 +19,15 @@ function TopNav() {
     <div className="sticky top-0 z-20 border-b bg-white/70 backdrop-blur">
       <div className="container flex h-14 items-center justify-between">
         <Link
-            to="/orgs"
-            aria-label="Go to home"
-            className="inline-flex items-center gap-3 group rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 cursor-pointer"
-          >
-            <FluxLogo size={20} />
-            <span className="hidden sm:inline text-xs font-medium text-slate-500 group-hover:text-slate-700">
-              Team execution, simplified
-            </span>
-          </Link>
+          to="/orgs"
+          aria-label="Go to home"
+          className="inline-flex items-center gap-3 group rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 cursor-pointer"
+        >
+          <FluxLogo size={20} />
+          <span className="hidden sm:inline text-xs font-medium text-slate-500 group-hover:text-slate-700">
+            Team execution, simplified
+          </span>
+        </Link>
         <button className="btn-outline" onClick={logout}>
           Logout
         </button>
@@ -40,6 +40,7 @@ function TopNav() {
 
 export default function Orgs() {
   const qc = useQueryClient();
+  const nav = useNavigate();
 
   const { data: me, isLoading: meLoading } = useQuery({
     queryKey: ["me"],
@@ -51,7 +52,6 @@ export default function Orgs() {
     queryFn: async () => (await api.get("/orgs")).data,
   });
 
-  // Always render over an array
   const orgList = useMemo<any[]>(() => (Array.isArray(orgs) ? orgs : []), [orgs]);
 
   const createOrgInput = useRef<HTMLInputElement>(null);
@@ -69,23 +69,21 @@ export default function Orgs() {
   const leaveOrg = useMutation({
     mutationFn: async (orgId: string) => {
       try {
-        return (await api.delete(`/orgs/${orgId}/leave`)).data; // matches server.ts
+        return (await api.delete(`/orgs/${orgId}/leave`)).data; // preferred
       } catch (e: any) {
         const s = e?.response?.status;
         if (s !== 404) throw e;
-
-        // Fallbacks for older servers
         try {
-          return (await api.post(`/orgs/${orgId}/leave`)).data;
+          return (await api.post(`/orgs/${orgId}/leave`)).data; // alt
         } catch (e2: any) {
           const s2 = e2?.response?.status;
           if (s2 !== 404) throw e2;
           try {
-            return (await api.delete(`/orgs/${orgId}/members/me`)).data;
+            return (await api.delete(`/orgs/${orgId}/members/me`)).data; // alt
           } catch (e3: any) {
             const userId = me?.id;
             if (!userId) throw new Error("user not loaded");
-            return (await api.delete(`/orgs/${orgId}/members/${userId}`)).data;
+            return (await api.delete(`/orgs/${orgId}/members/${userId}`)).data; // alt
           }
         }
       }
@@ -113,6 +111,65 @@ export default function Orgs() {
     },
   });
 
+  /* ---------------------- Delete account wiring ----------------------- */
+
+  // Is the user an admin anywhere?
+  const isAdminAnywhere = useMemo<boolean>(() => {
+    const m = me?.memberships || [];
+    return Array.isArray(m) && m.some((x: any) => x?.role === "ADMIN");
+  }, [me]);
+
+  const deleteAccount = useMutation({
+    mutationFn: async () => {
+      // Try canonical route first
+      try {
+        return (await api.delete("/me")).data;
+      } catch (e: any) {
+        const s = e?.response?.status;
+        if (s !== 404) throw e;
+      }
+      // Fallbacks for older servers
+      try {
+        return (await api.delete("/users/me")).data;
+      } catch (e2: any) {
+        const s2 = e2?.response?.status;
+        if (s2 !== 404) throw e2;
+      }
+      // Last resort
+      return (await api.post("/auth/delete-account")).data;
+    },
+    onSuccess: async () => {
+      try {
+        await api.post("/auth/logout");
+      } catch {}
+      await qc.clear();
+      nav("/", { replace: true });
+    },
+    onError: (err: any) => {
+      const msg =
+        err?.response?.data?.message ||
+        err?.message ||
+        "We couldn’t delete your account. Please try again.";
+      alert(msg);
+    },
+  });
+
+  function onDeleteClick() {
+    if (isAdminAnywhere) {
+      alert("You’re an admin of at least one organization. Transfer or remove admin rights before deleting your account.");
+      return;
+    }
+    if (
+      confirm(
+        "This will permanently delete your account and remove all mentions of it across the platform. This cannot be undone. Continue?"
+      )
+    ) {
+      deleteAccount.mutate();
+    }
+  }
+
+  /* --------------------------- UI bits -------------------------------- */
+
   const greeting = useMemo(() => me?.name || me?.handle || "there", [me]);
   const handleTag = useMemo(() => me?.handle || "user", [me]);
 
@@ -120,10 +177,9 @@ export default function Orgs() {
     <div className="relative min-h-screen overflow-x-hidden">
       <TopNav />
 
-      {/* --- Decorative background layer --- */}
+      {/* Decorative background */}
       <div aria-hidden className="pointer-events-none absolute inset-0 z-0 overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-indigo-50 via-sky-50 to-white" />
-        {/* Brand waves */}
         <FluxWaves className="absolute inset-x-0 -top-16" />
       </div>
 
@@ -143,7 +199,25 @@ export default function Orgs() {
                 @{handleTag} ·{" "}
                 {orgLoading ? "—" : `${orgList.length} organization${orgList.length === 1 ? "" : "s"}`}
               </p>
+              
             </div>
+
+            {/* spacer */}
+            <div className="flex-1" />
+
+            {/* Delete account button */}
+            <button
+              className="btn-outline border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-60"
+              onClick={onDeleteClick}
+              disabled={deleteAccount.isPending || meLoading}
+              title={
+                isAdminAnywhere
+                  ? "You are an admin of an organization"
+                  : "Permanently delete your account"
+              }
+            >
+              {deleteAccount.isPending ? "Deleting…" : "Delete account"}
+            </button>
           </div>
         </header>
 
@@ -314,7 +388,7 @@ function useOrgTeams(orgId?: string) {
       }
     },
     enabled: !!orgId,
-    initialData: [], // ensures an array on first render
+    initialData: [],
   });
 }
 
