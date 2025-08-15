@@ -1,0 +1,53 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - pg:/var/lib/postgresql/data
+    networks: [appnet]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    env_file:
+      - ./api/.env.prod
+    environment:
+      DATABASE_URL: postgresql://app:change-me@db:5432/app?schema=public
+      NODE_ENV: production
+      PORT: 4000
+    depends_on:
+      - db
+    networks: [appnet]
+    restart: unless-stopped
+
+  # TLS the easy way
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      DOMAIN_API: api.fluxtasktracker.com
+    depends_on:
+      - api
+    networks: [appnet]
+    restart: unless-stopped
+
+networks:
+  appnet: {}
+
+volumes:
+  pg: {}
+  caddy-data: {}
+  caddy-config: {}

@@ -1,0 +1,18 @@
+api.fluxtasktracker.com {
+  encode gzip
+
+  # Node API is listening on 0.0.0.0:4000
+  reverse_proxy 127.0.0.1:4000
+
+  # Security headers
+  header {
+    X-Frame-Options "DENY"
+    X-Content-Type-Options "nosniff"
+    Referrer-Policy "no-referrer"
+  }
+
+  # (optional) access logs
+  log {
+    output file /var/log/caddy/api.access.log
+  }
+}

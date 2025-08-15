@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import dayjs, { Dayjs } from "dayjs";
 import { api } from "../api";
+import { FluxMarkWithWaves, FluxLogo } from "../components/FluxLogo";
 
 /* ---------------------------------------------------------------------- */
 /* Types & constants                                                      */
@@ -103,8 +104,23 @@ export default function Team() {
       {/* Top bar */}
       <div className="sticky top-0 z-20 border-b bg-white/70 backdrop-blur">
         <div className="container flex h-14 items-center justify-between gap-3">
-          <Link to="/orgs" className="btn-outline shrink-0">← Back</Link>
-          <h1 className="text-lg font-semibold truncate">{teamName}</h1>
+          
+          <Link
+                      to="/orgs"
+                      aria-label="Go to home"
+                      className="inline-flex items-center gap-3 group rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 cursor-pointer"
+                    >
+                      <FluxLogo size={20} />
+                      <span className="hidden sm:inline text-xs font-medium text-slate-500 group-hover:text-slate-700">
+                        Team execution, simplified
+                      </span>
+                    </Link>
+          <h1 className="min-w-0 flex items-center gap-2 text-lg sm:text-xl font-semibold leading-none">
+            <FluxMarkWithWaves size={18} />
+            <span className="truncate bg-gradient-to-r from-indigo-600 to-cyan-500 text-transparent bg-clip-text">
+              {teamName}
+            </span>
+          </h1>
           <div className="inline-flex rounded-xl border bg-white p-1 shrink-0">
             <TabButton active={tab==="tasks"} onClick={()=>setTab("tasks")}>Tasks</TabButton>
             <TabButton active={tab==="deadlines"} onClick={()=>setTab("deadlines")}>Deadlines</TabButton>
@@ -223,30 +239,66 @@ function TaskModal({
     [members]
   );
 
+  // FIX: subscribe to the shared tasks list and select the live version of this task.
+  const { data: tasksLive } = useQuery({
+    queryKey: ["tasks", teamId],
+    queryFn: async () => (await api.get(`/teams/${teamId}/tasks`)).data,
+    enabled: !!teamId,
+  });
+
+  const liveTask = useMemo(
+    () => (tasksLive || []).find((t: any) => t.id === task.id) ?? task,
+    [tasksLive, task]
+  );
+
+  const key = ["tasks", teamId] as const;
+
   async function refreshSelf() {
-    await qc.invalidateQueries({ queryKey: ["tasks", teamId] });
+    await qc.invalidateQueries({ queryKey: key });
   }
 
+  // FIX: optimistic status update so the controlled select reflects immediately.
   async function setStatus(status: StatusKey) {
     setWorking(true);
+    const prev = qc.getQueryData<any[]>(key);
+    qc.setQueryData<any[]>(key, (old) =>
+      old ? old.map((t) => (t.id === task.id ? { ...t, status } : t)) : old
+    );
     try {
       await api.patch(`/tasks/${task.id}`, { status });
+    } catch (e) {
+      qc.setQueryData(key, prev);
+      console.error(e);
+    } finally {
       await refreshSelf();
-    } finally { setWorking(false); }
+      setWorking(false);
+    }
   }
 
+  // FIX: optimistic patch for title/description/dueDate so the read view updates instantly.
   async function saveEdits() {
     if (!perms?.canWriteAll) return;
     setWorking(true);
+    const next = {
+      title: title.trim() || "Untitled task",
+      description: description.trim() || null,
+      dueDate: due ? new Date(due).toISOString() : null,
+    };
+    const prev = qc.getQueryData<any[]>(key);
+    qc.setQueryData<any[]>(key, (old) =>
+      old ? old.map((t) => (t.id === task.id ? { ...t, ...next } : t)) : old
+    );
     try {
-      await api.patch(`/tasks/${task.id}`, {
-        title: title.trim() || "Untitled task",
-        description: description.trim() || null,
-        dueDate: due ? new Date(due).toISOString() : null,
-      });
+      await api.patch(`/tasks/${task.id}`, next);
       await refreshSelf();
       setEditMode(false);
-    } finally { setWorking(false); }
+    } catch (e) {
+      qc.setQueryData(key, prev);
+      console.error(e);
+      alert("Failed to save changes.");
+    } finally {
+      setWorking(false);
+    }
   }
 
   async function deleteTask() {
@@ -290,8 +342,9 @@ function TaskModal({
     } finally { setWorking(false); }
   }
 
-  const overdue = isOverdue(task);
-  const soon = isDueSoon(task);
+  // FIX: compute badges from live data
+  const overdue = isOverdue(liveTask);
+  const soon = isDueSoon(liveTask);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -301,18 +354,19 @@ function TaskModal({
         <div className="flex items-start justify-between gap-3">
           {!editMode ? (
             <div className="min-w-0">
-              <h3 className="text-lg font-semibold truncate">{task.title}</h3>
+              <h3 className="text-lg font-semibold truncate">{liveTask.title}</h3>
               <div className="mt-1 text-sm text-slate-600">
                 Status:&nbsp;
+                {/* FIX: controlled select bound to live status */}
                 <select
                   className="select inline-block"
-                  defaultValue={task.status}
+                  value={liveTask.status}
                   onChange={(e)=>setStatus(e.target.value as StatusKey)}
                   disabled={working}
                 >
                   {STATUS.map(s=> <option key={s.key} value={s.key}>{s.label}</option>)}
                 </select>
-                {task.dueDate && <> · Deadline: {dayjs(task.dueDate).format("MMM D, YYYY HH:mm")}</>}
+                {liveTask.dueDate && <> · Deadline: {dayjs(liveTask.dueDate).format("MMM D, YYYY HH:mm")}</>}
               </div>
               <div className="mt-1 flex gap-2">
                 {overdue && <span className="text-xs px-2 py-0.5 rounded-full bg-rose-100 text-rose-800">Overdue</span>}
@@ -346,16 +400,16 @@ function TaskModal({
         </div>
 
         {/* Description (read mode) */}
-        {!editMode && task.description && (
-          <div className="mt-3 text-slate-800 whitespace-pre-wrap">{task.description}</div>
+        {!editMode && liveTask.description && (
+          <div className="mt-3 text-slate-800 whitespace-pre-wrap">{liveTask.description}</div>
         )}
 
         {/* Assignees */}
         <div className="mt-4">
           <div className="font-medium mb-1 text-sm">Assignees</div>
-          {task.assignees?.length ? (
+          {liveTask.assignees?.length ? (
             <div className="flex flex-wrap gap-2 text-sm">
-              {task.assignees.map((a:any)=>(
+              {liveTask.assignees.map((a:any)=>(
                 <span key={a.userId} className="rounded-full border px-2 py-0.5 inline-flex items-center gap-2">
                   {a.user?.name || a.user?.handle || nameById.get(a.userId) || a.userId}
                   {perms?.canWriteAll && (
@@ -383,8 +437,8 @@ function TaskModal({
         <div className="mt-5">
           <div className="font-semibold">Notes</div>
           <div className="mt-2 space-y-2 max-h-48 overflow-auto pr-1">
-            {task.notes?.length ? (
-              task.notes.map((n:any)=> (
+            {liveTask.notes?.length ? (
+              liveTask.notes.map((n:any)=> (
                 <div key={n.id} className="note text-sm">
                   {highlightMentions(n.content)}
                   <div className="text-xs text-slate-500 mt-1">
@@ -592,7 +646,7 @@ function TasksTab({ teamId }: { teamId: string }) {
   const openTaskModal = (t:any) => { setModalTask(t); setModalOpen(true); };
   const closeTaskModal = () => { setModalOpen(false); setModalTask(null); };
 
-  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  // const stop = (e: React.SyntheticEvent) => e.stopPropagation();
 
   /* ------------------------------ Render -------------------------------- */
 
@@ -728,146 +782,232 @@ function TasksTab({ teamId }: { teamId: string }) {
                   )}
 
                   {items.map((t: any) => {
-                    const overdue = isOverdue(t);
-                    const soon = isDueSoon(t);
-                    const title = (t.title || "").trim() || "Untitled task";
-                    return (
-                      <article
-                        key={t.id}
-                        className={`rounded-2xl border bg-white p-4 shadow-sm transition overflow-hidden cursor-pointer ${
-                          isMine(t) ? "ring-2 ring-indigo-300" : "hover:shadow-md"
-                        }`}
-                        onClick={()=>openTaskModal(t)}
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <h4 className="font-semibold leading-6 truncate" title={title}>
-                              {title}
-                            </h4>
-                            {overdue && (
-                              <span className="shrink-0 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
-                                Overdue
-                              </span>
-                            )}
-                            {!overdue && soon && (
-                              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
-                                Due soon
-                              </span>
-                            )}
-                          </div>
+  const overdue = isOverdue(t);
+  const soon = isDueSoon(t);
+  const title = (t.title || "").trim() || "Untitled task";
 
-                          {t.description && (
-                            <p className="mt-1 text-sm text-slate-700 whitespace-pre-wrap break-words line-clamp-3">
-                              {t.description}
-                            </p>
-                          )}
+  const open = () => openTaskModal(t);
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
 
-                          {t.dueDate && (
-                            <div className="mt-1 text-xs whitespace-nowrap">
-                              <span className="font-medium text-slate-600">Due:</span>{" "}
-                              <span className={overdue ? "text-rose-700 font-medium" : soon ? "text-amber-700 font-medium" : "text-slate-700"}>
-                                {dayjs(t.dueDate).format("MMM D, YYYY HH:mm")}
-                              </span>
-                            </div>
-                          )}
-                        </div>
+  return (
+    <article
+      key={t.id}
+      role="button"
+      tabIndex={0}
+      onClick={open}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          open();
+        }
+      }}
+      className={`cursor-pointer rounded-2xl border bg-white p-4 shadow-sm transition overflow-hidden ${
+        isMine(t) ? "ring-2 ring-indigo-300" : "hover:shadow-md"
+      }`}
+    >
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 min-w-0">
+          <h4 className="font-semibold leading-6 truncate" title={title}>
+            {title}
+          </h4>
+          {overdue && (
+            <span className="shrink-0 rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold text-rose-700">
+              Overdue
+            </span>
+          )}
+          {!overdue && soon && (
+            <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
+              Due soon
+            </span>
+          )}
+        </div>
 
-                        <div className="mt-3 grid gap-2" onClick={stop}>
-                          <select
-                            className="select w-full"
-                            defaultValue={t.status}
-                            onChange={(e) => updateStatus(t.id, e.target.value as StatusKey)}
-                            title="Update status"
-                            onClick={stop}
-                          >
-                            {STATUS.map((s) => (
-                              <option key={s.key} value={s.key}>{s.label}</option>
-                            ))}
-                          </select>
+        {t.description && (
+          <p className="mt-1 text-sm text-slate-700 whitespace-pre-wrap break-words line-clamp-3">
+            {t.description}
+          </p>
+        )}
 
-                          {perms?.canWriteAll && (
-                            <div className="flex gap-2">
-                              <button className="btn-outline w-full" title="Edit" onClick={()=>openTaskModal(t)}>Edit</button>
-                              <button className="btn-outline w-full" title="Delete" onClick={(e)=>{ stop(e); deleteTask(t.id); }}>Delete</button>
-                            </div>
-                          )}
-                        </div>
+        {t.dueDate && (
+          <div className="mt-1 text-xs whitespace-nowrap">
+            <span className="font-medium text-slate-600">Due:</span>{" "}
+            <span
+              className={
+                overdue
+                  ? "text-rose-700 font-medium"
+                  : soon
+                  ? "text-amber-700 font-medium"
+                  : "text-slate-700"
+              }
+            >
+              {dayjs(t.dueDate).format("MMM D, YYYY HH:mm")}
+            </span>
+          </div>
+        )}
+      </div>
 
-                        <div className="mt-3 text-sm text-slate-700" onClick={stop}>
-                          <div className="font-medium mb-1">Assigned</div>
-                          {t.assignees?.length ? (
-                            <div className="flex flex-wrap gap-2">
-                              {t.assignees.map((a: any) => (
-                                <span key={a.userId} className="inline-flex items-center gap-2 rounded-full border px-2 py-0.5">
-                                  {nameById.get(a.userId) || a.userId}
-                                  {perms?.canAssign && (
-                                    <button className="text-slate-500 hover:text-slate-800" title="Unassign" onClick={(e)=>{ stop(e); unassign(t.id, a.userId); }}>×</button>
-                                  )}
-                                </span>
-                              ))}
-                            </div>
-                          ) : <span className="text-slate-500">none</span>}
-                        </div>
+      {/* Controls — stop propagation only on the actual controls */}
+      <div className="mt-3 grid gap-2">
+        <select
+          className="select w-full"
+          defaultValue={t.status}
+          onChange={(e) => updateStatus(t.id, e.target.value as StatusKey)}
+          title="Update status"
+          onClick={stop}
+        >
+          {STATUS.map((s) => (
+            <option key={s.key} value={s.key}>
+              {s.label}
+            </option>
+          ))}
+        </select>
 
-                        {perms?.canAssign && (
-                          <div className="mt-2 grid gap-2" onClick={stop}>
-                            <select
-                              className="select w-full"
-                              value={assignPick[t.id] || ""}
-                              onChange={(e) => setAssignPick((s) => ({ ...s, [t.id]: e.target.value }))}
-                              onClick={stop}
-                            >
-                              <option value="" disabled>Assign to…</option>
-                              {members?.map((m: any) => (
-                                <option key={m.userId} value={m.userId}>
-                                  {m.name || m.handle || m.userId} {m.role === "LEADER" ? "• LEAD" : ""}
-                                </option>
-                              ))}
-                            </select>
-                            <button className="btn w-full" onClick={(e)=>{ stop(e); assign(t.id); }}>
-                              Assign
-                            </button>
-                          </div>
-                        )}
+        {perms?.canWriteAll && (
+          <div className="flex gap-2">
+            <button
+              className="btn-outline w-full"
+              title="Edit"
+              onClick={(e) => {
+                stop(e);
+                open();
+              }}
+            >
+              Edit
+            </button>
+            <button
+              className="btn-outline w-full"
+              title="Delete"
+              onClick={(e) => {
+                stop(e);
+                deleteTask(t.id);
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        )}
+      </div>
 
-                        <div className="mt-3" onClick={stop}>
-                          <button className="btn-outline w-full justify-between" onClick={(e)=>{ stop(e); setOpenNotes((s) => ({ ...s, [t.id]: !s[t.id] })); }}>
-                            <span>Notes ({t.notes?.length || 0})</span>
-                            <span className="ml-2">{openNotes[t.id] ? "▲" : "▼"}</span>
-                          </button>
+      {/* Assigned */}
+      <div className="mt-3 text-sm text-slate-700">
+        <div className="font-medium mb-1">Assigned</div>
+        {t.assignees?.length ? (
+          <div className="flex flex-wrap gap-2">
+            {t.assignees.map((a: any) => (
+              <span
+                key={a.userId}
+                className="inline-flex items-center gap-2 rounded-full border px-2 py-0.5"
+              >
+                {nameById.get(a.userId) || a.userId}
+                {perms?.canAssign && (
+                  <button
+                    className="text-slate-500 hover:text-slate-800"
+                    title="Unassign"
+                    onClick={(e) => {
+                      stop(e);
+                      unassign(t.id, a.userId);
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <span className="text-slate-500">none</span>
+        )}
+      </div>
 
-                          {openNotes[t.id] && (
-                            <div className="mt-2 space-y-2 max-h-40 overflow-auto pr-1">
-                              {t.notes?.length ? (
-                                t.notes.map((n: any) => (
-                                  <div key={n.id} className="note text-sm">
-                                    {highlightMentions(n.content)}
-                                    <div className="text-xs text-slate-500 mt-1">
-                                      {dayjs(n.createdAt).format("MMM D, HH:mm")}
-                                    </div>
-                                  </div>
-                                ))
-                              ) : <div className="text-xs text-slate-500">No notes yet.</div>}
-                            </div>
-                          )}
+      {/* Assign */}
+      {perms?.canAssign && (
+        <div className="mt-2 grid gap-2">
+          <select
+            className="select w-full"
+            value={assignPick[t.id] || ""}
+            onChange={(e) =>
+              setAssignPick((s) => ({ ...s, [t.id]: e.target.value }))
+            }
+            onClick={stop}
+          >
+            <option value="" disabled>
+              Assign to…
+            </option>
+            {members?.map((m: any) => (
+              <option key={m.userId} value={m.userId}>
+                {m.name || m.handle || m.userId}{" "}
+                {m.role === "LEADER" ? "• LEAD" : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            className="btn w-full"
+            onClick={(e) => {
+              stop(e);
+              assign(t.id);
+            }}
+          >
+            Assign
+          </button>
+        </div>
+      )}
 
-                          <div className="mt-2 grid gap-2">
-                            <input
-                              className="input w-full"
-                              placeholder="Add note (use @handle)"
-                              value={noteText[t.id] || ""}
-                              onChange={(e) => setNoteText((s) => ({ ...s, [t.id]: e.target.value }))}
-                              onKeyDown={(e) => e.key === "Enter" && addNote(t.id)}
-                              onClick={stop}
-                            />
-                            <button className="btn w-full" onClick={(e)=>{ stop(e); addNote(t.id); }}>
-                              Post
-                            </button>
-                          </div>
-                        </div>
-                      </article>
-                    );
-                  })}
+      {/* Notes */}
+      <div className="mt-3">
+        <button
+          className="btn-outline w-full justify-between"
+          onClick={(e) => {
+            stop(e);
+            setOpenNotes((s) => ({ ...s, [t.id]: !s[t.id] }));
+          }}
+        >
+          <span>Notes ({t.notes?.length || 0})</span>
+          <span className="ml-2">{openNotes[t.id] ? "▲" : "▼"}</span>
+        </button>
+
+        {openNotes[t.id] && (
+          <div className="mt-2 space-y-2 max-h-40 overflow-auto pr-1">
+            {t.notes?.length ? (
+              t.notes.map((n: any) => (
+                <div key={n.id} className="note text-sm" onClick={stop}>
+                  {highlightMentions(n.content)}
+                  <div className="text-xs text-slate-500 mt-1">
+                    {dayjs(n.createdAt).format("MMM D, HH:mm")}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="text-xs text-slate-500">No notes yet.</div>
+            )}
+          </div>
+        )}
+
+        <div className="mt-2 grid gap-2">
+          <input
+            className="input w-full"
+            placeholder="Add note (use @handle)"
+            value={noteText[t.id] || ""}
+            onChange={(e) =>
+              setNoteText((s) => ({ ...s, [t.id]: e.target.value }))
+            }
+            onKeyDown={(e) => e.key === "Enter" && addNote(t.id)}
+            onClick={stop}
+          />
+          <button
+            className="btn w-full"
+            onClick={(e) => {
+              stop(e);
+              addNote(t.id);
+            }}
+          >
+            Post
+          </button>
+        </div>
+      </div>
+    </article>
+  );
+})}
+
                 </div>
               </div>
             </section>
@@ -893,7 +1033,7 @@ function TasksTab({ teamId }: { teamId: string }) {
 type CalView = "day" | "week" | "month" | "year";
 
 function DeadlinesTab({ teamId }: { teamId: string }) {
-  const qc = useQueryClient();
+  // const qc = useQueryClient();
 
   const { data: perms } = useQuery<Perms>({
     queryKey: ["perms", teamId],
@@ -1301,20 +1441,28 @@ function InfoTab({ teamId, onRenamed }:{ teamId:string; onRenamed:(name:string)=
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<{userId:string; label:string} | null>(null);
 
-  const options = (orgMembers || []).map((m:any)=> ({
-    userId: m.userId,
-    label: `${m.name || m.handle || m.userId}  ·  @${m.handle || m.userId}`
-  }));
+  // …above where you build options:
+type Option = { userId: string; label: string };
 
-  const filtered = query.trim()
-    ? options.filter(o => o.label.toLowerCase().includes(query.trim().toLowerCase()))
-    : options;
+// Build the dropdown options with an explicit type
+const options: Option[] = (orgMembers ?? []).map((m: any): Option => ({
+  userId: String(m.userId),
+  label: `${m.name || m.handle || m.userId}  ·  @${m.handle || m.userId}`,
+}));
 
-  function pick(o:{userId:string; label:string}) {
-    setSelected(o);
-    setQuery(o.label);
-    setOpen(false);
-  }
+// Filtered list is also explicitly typed
+const filtered: Option[] = query.trim()
+  ? options.filter((o: Option) =>
+      o.label.toLowerCase().includes(query.trim().toLowerCase())
+    )
+  : options;
+
+function pick(o: Option) {
+  setSelected(o);
+  setQuery(o.label);
+  setOpen(false);
+}
+
 
   return (
     <div className="space-y-6">

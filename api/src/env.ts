@@ -1,6 +1,6 @@
 import 'dotenv/config';
 export const env = {
-  DATABASE_URL: process.env.DATABASE_URL!,
+  // DATABASE_URL: process.env.DATABASE_URL!,
   JWT_SECRET: process.env.JWT_SECRET!,
   CLIENT_URL: process.env.CLIENT_URL || "http://localhost:5173",
   GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID!,
@@ -11,4 +11,9 @@ export const env = {
   MS_SCOPE: process.env.MS_SCOPE || "https://graph.microsoft.com/User.Read",
   MS_TENANT: process.env.MS_TENANT || "common",
   MS_CALLBACK_URL: process.env.MS_CALLBACK_URL!,
+  NODE_ENV: process.env.NODE_ENV || "development",
+  PORT: Number(process.env.PORT || 3000),
+  DATABASE_URL: process.env.DATABASE_URL || "",
+  // comma-separated list of exact origins
+  CORS_ORIGINS: (process.env.CORS_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean),
 };

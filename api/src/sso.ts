@@ -9,7 +9,7 @@ passport.use(new GoogleStrategy({
     clientID: process.env.GOOGLE_CLIENT_ID!,
     clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
     callbackURL: process.env.GOOGLE_CALLBACK_URL!,
-}, async (_access, _refresh, profile, done) => {
+}, async (_access: any, _refresh: any, profile: any, done: (err: any, user?: any) => void) => {
   try {
     const provider = "google";
     const providerId = profile.id;
@@ -26,7 +26,8 @@ passport.use(new GoogleStrategy({
       ident = await prisma.identity.create({ data: { provider, providerId, userId: user.id } });
     }
     const user = await prisma.user.findUnique({ where: { id: ident.userId } });
-    return done(null, user);
+    if (user) return done(null, user);
+    return done(null, false);
   } catch (e) { return done(e as any); }
 }));
 

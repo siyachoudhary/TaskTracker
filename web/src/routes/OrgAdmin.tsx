@@ -1,45 +1,47 @@
-import { useMemo, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { api } from '../api'
+import { useMemo, useState } from "react";
+import { useParams, Link } from "react-router-dom";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "../api";
+import { FluxLogo, FluxMarkWithWaves, FluxWaves } from "../components/FluxLogo";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 
-function MiniBtn({
-  children,
-  variant = 'solid',
-  onClick,
-  disabled
-}: {
-  children: React.ReactNode
-  variant?: 'solid' | 'outline'
-  onClick?: () => void
-  disabled?: boolean
-}) {
-  const base = 'px-3 py-1.5 rounded-lg text-sm'
-  const solid = 'bg-slate-900 text-white hover:bg-slate-800 disabled:opacity-50'
-  const outline = 'border border-slate-300 hover:bg-slate-100 disabled:opacity-50'
+/* --------------------------- Tiny themed controls --------------------------- */
+
+type MiniBtnProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "solid" | "outline";
+  children: ReactNode;
+};
+
+function MiniBtn({ children, variant = "solid", className, ...rest }: MiniBtnProps) {
+  const base =
+    "px-3 py-1.5 rounded-lg text-sm transition";
+  const solid =
+    "bg-gradient-to-r from-indigo-600 to-cyan-500 text-white hover:opacity-95 disabled:opacity-50 border-0";
+  const outline =
+    "border border-slate-300 hover:bg-slate-100 disabled:opacity-50";
+
+  const cls = `${base} ${variant === "solid" ? solid : outline} ${className || ""}`;
+
   return (
-    <button
-      className={`${base} ${variant === 'solid' ? solid : outline}`}
-      onClick={onClick}
-      disabled={disabled}
-    >
+    <button className={cls} {...rest}>
       {children}
     </button>
-  )
+  );
 }
+
 
 function MiniSelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
     <select
       {...props}
-      className={`border border-slate-300 rounded-lg px-2 py-1.5 text-sm ${props.className || ''}`}
+      className={`rounded-lg border border-slate-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-200 ${props.className || ""}`}
     />
-  )
+  );
 }
 
 function AdminBadge() {
   return (
-    <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 text-emerald-700 px-3 py-1 text-xs font-semibold">
+    <span className="ml-2 inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-700">
       Admin
     </span>
   );
@@ -47,235 +49,328 @@ function AdminBadge() {
 
 function OrgJoinCode({ orgId }: { orgId: string }) {
   const { data: codes, refetch, isFetching } = useQuery({
-    queryKey: ['orgJoinCodes', orgId],
+    queryKey: ["orgJoinCodes", orgId],
     queryFn: async () => (await api.get(`/orgs/${orgId}/join-codes`)).data,
-    enabled: !!orgId
-  })
-  const gen = async () => { await api.post(`/orgs/${orgId}/join-codes`, {}); await refetch() }
-  const code = codes?.[0]
+    enabled: !!orgId,
+  });
+  const gen = async () => {
+    await api.post(`/orgs/${orgId}/join-codes`, {});
+    await refetch();
+  };
+  const code = codes?.[0];
   return (
     <div className="mt-3 flex items-center gap-3">
-      <button className="btn" onClick={gen} disabled={isFetching}>
-        {isFetching ? 'Generating…' : 'Generate org join code'}
-      </button>
+      <MiniBtn onClick={gen} disabled={isFetching}>
+        {isFetching ? "Generating…" : "Generate org join code"}
+      </MiniBtn>
       {code ? (
         <div className="text-sm">
-          <code className="bg-slate-100 px-2 py-1 rounded">{code.code}</code>
+          <code className="rounded bg-slate-100 px-2 py-1">{code.code}</code>
           <span className="ml-2 text-slate-600">uses: {code.uses}</span>
         </div>
-      ) : <div className="text-sm text-slate-500">No active code</div>}
+      ) : (
+        <div className="text-sm text-slate-500">No active code</div>
+      )}
     </div>
-  )
+  );
 }
 
-export default function OrgAdmin(){
-  const { id } = useParams()
-  const orgId = id as string | undefined
-  const qc = useQueryClient()
-  const [q, setQ] = useState('')
-  const [openTeams, setOpenTeams] = useState<Record<string, boolean>>({})
+/* --------------------------------- Page --------------------------------- */
+
+export default function OrgAdmin() {
+  const { id } = useParams();
+  const orgId = id as string | undefined;
+  const qc = useQueryClient();
+  const [q, setQ] = useState("");
+  const [openTeams, setOpenTeams] = useState<Record<string, boolean>>({});
 
   // ---- DETAILS with fallback (/details -> /orgs/:id) ----
   const { data: details, isLoading, isError } = useQuery({
-    queryKey: ['orgDetails', orgId],
+    queryKey: ["orgDetails", orgId],
     enabled: !!orgId,
     retry: false,
     queryFn: async () => {
       try {
-        return (await api.get(`/orgs/${orgId}/details`)).data
+        return (await api.get(`/orgs/${orgId}/details`)).data;
       } catch (e: any) {
         if (e?.response?.status === 404) {
           // Fallback to simple org object
-          return (await api.get(`/orgs/${orgId}`)).data
+          return (await api.get(`/orgs/${orgId}`)).data;
         }
-        throw e
+        throw e;
       }
-    }
-  })
+    },
+  });
 
   // ---- MEMBERS with fallback (/members -> /users) ----
   const { data: orgMembers } = useQuery({
-    queryKey: ['orgMembers', orgId],
+    queryKey: ["orgMembers", orgId],
     enabled: !!orgId,
     retry: false,
     queryFn: async () => {
       try {
-        return (await api.get(`/orgs/${orgId}/members`)).data
+        return (await api.get(`/orgs/${orgId}/members`)).data;
       } catch (e: any) {
         if (e?.response?.status === 404) {
-          return (await api.get(`/orgs/${orgId}/users`)).data
+          return (await api.get(`/orgs/${orgId}/users`)).data;
         }
-        throw e
+        throw e;
       }
-    }
-  })
+    },
+  });
 
   // Teams list
   const { data: teams } = useQuery({
-    queryKey: ['teamsForAdmin', orgId],
+    queryKey: ["teamsForAdmin", orgId],
     queryFn: async () => (await api.get(`/orgs/${orgId}/teams`)).data,
-    enabled: !!orgId
-  })
+    enabled: !!orgId,
+  });
 
   const updateOrgRole = useMutation({
-    mutationFn: async ({ userId, role }: { userId: string; role: "ADMIN" | "MEMBER" }) =>
-      (await api.patch(`/orgs/${orgId}/members/${userId}`, { role })).data,
+    mutationFn: async ({
+      userId,
+      role,
+    }: {
+      userId: string;
+      role: "ADMIN" | "MEMBER";
+    }) => (await api.patch(`/orgs/${orgId}/members/${userId}`, { role })).data,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['orgMembers', orgId] })
-      qc.invalidateQueries({ queryKey: ['orgDetails', orgId] })
-    }
-  })
+      qc.invalidateQueries({ queryKey: ["orgMembers", orgId] });
+      qc.invalidateQueries({ queryKey: ["orgDetails", orgId] });
+    },
+  });
 
+  // Rename org (try PATCH /orgs/:orgId; if server doesn't support, show a friendly notice)
   const rename = useMutation({
-    mutationFn: async (name: string) => (await api.patch(`/orgs/${orgId}`, { name })).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['orgDetails', orgId] })
-  })
+    mutationFn: async (name: string) => {
+      try {
+        return (await api.patch(`/orgs/${orgId}`, { name })).data;
+      } catch (e: any) {
+        if (e?.response?.status === 404) {
+          const msg =
+            "This server build does not implement PATCH /orgs/:orgId (rename). Update the API or remove this control.";
+          throw Object.assign(new Error(msg), { code: "NO_ENDPOINT" });
+        }
+        throw e;
+      }
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["orgDetails", orgId] }),
+    onError: (e: any) => {
+      alert(e?.message || "Failed to rename organization.");
+    },
+  });
 
   const addToTeam = useMutation({
-    mutationFn: async ({ userId, teamId }: { userId: string; teamId: string }) =>
-      (await api.post(`/teams/${teamId}/members`, { userId })).data,
-    onSuccess: () => qc.invalidateQueries()
-  })
+    mutationFn: async ({
+      userId,
+      teamId,
+    }: {
+      userId: string;
+      teamId: string;
+    }) => (await api.post(`/teams/${teamId}/members`, { userId })).data,
+    onSuccess: () => qc.invalidateQueries(),
+  });
 
   const makeLeader = useMutation({
-    mutationFn: async ({ userId, teamId }: { userId: string; teamId: string }) =>
-      (await api.post(`/teams/${teamId}/leader`, { userId })).data,
-    onSuccess: () => qc.invalidateQueries()
-  })
+    mutationFn: async ({
+      userId,
+      teamId,
+    }: {
+      userId: string;
+      teamId: string;
+    }) => (await api.post(`/teams/${teamId}/leader`, { userId })).data,
+    onSuccess: () => qc.invalidateQueries(),
+  });
 
   const deleteTeam = useMutation({
-    mutationFn: async (teamId: string) => (await api.delete(`/teams/${teamId}`)).data,
+    mutationFn: async (teamId: string) =>
+      (await api.delete(`/teams/${teamId}`)).data,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['teamsForAdmin', orgId] })
-      qc.invalidateQueries({ queryKey: ['orgDetails', orgId] })
-    }
-  })
+      qc.invalidateQueries({ queryKey: ["teamsForAdmin", orgId] });
+      qc.invalidateQueries({ queryKey: ["orgDetails", orgId] });
+    },
+  });
 
   const removeFromTeam = useMutation({
-    mutationFn: async ({ teamId, userId }: { teamId: string; userId: string }) =>
-      (await api.delete(`/teams/${teamId}/members/${userId}`)).data,
+    mutationFn: async ({
+      teamId,
+      userId,
+    }: {
+      teamId: string;
+      userId: string;
+    }) => (await api.delete(`/teams/${teamId}/members/${userId}`)).data,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['teamsForAdmin', orgId] })
-      qc.invalidateQueries({ queryKey: ['orgDetails', orgId] })
-    }
-  })
+      qc.invalidateQueries({ queryKey: ["teamsForAdmin", orgId] });
+      qc.invalidateQueries({ queryKey: ["orgDetails", orgId] });
+    },
+  });
 
   const deleteOrg = useMutation({
     mutationFn: async () => (await api.delete(`/orgs/${orgId}`)).data,
     onSuccess: () => {
-      qc.removeQueries({ queryKey: ['orgs'] })
-      window.location.href = '/orgs'
-    }
-  })
+      qc.removeQueries({ queryKey: ["orgs"] });
+      window.location.href = "/orgs";
+    },
+  });
 
   const removeFromOrg = useMutation({
-    mutationFn: async (userId: string) => (await api.delete(`/orgs/${orgId}/members/${userId}`)).data,
+    mutationFn: async (userId: string) =>
+      (await api.delete(`/orgs/${orgId}/members/${userId}`)).data,
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['orgMembers', orgId] })
-      qc.invalidateQueries({ queryKey: ['orgDetails', orgId] })
-      qc.invalidateQueries({ queryKey: ['teamsForAdmin', orgId] })
-      alert('Removed from organization.')
+      qc.invalidateQueries({ queryKey: ["orgMembers", orgId] });
+      qc.invalidateQueries({ queryKey: ["orgDetails", orgId] });
+      qc.invalidateQueries({ queryKey: ["teamsForAdmin", orgId] });
+      alert("Removed from organization.");
     },
     onError: (e: any) => {
-      const msg = e?.response?.data?.error === 'cannot_remove_admin'
-        ? 'Admins cannot be removed.'
-        : 'Failed to remove from organization.'
-      alert(msg)
-    }
-  })
+      const msg =
+        e?.response?.data?.error === "cannot_remove_admin"
+          ? "Admins cannot be removed."
+          : "Failed to remove from organization.";
+      alert(msg);
+    },
+  });
 
-  const filtered = useMemo(()=>{
-    if(!q.trim()) return orgMembers || []
-    const s = q.trim().toLowerCase()
-    return (orgMembers||[]).filter((m:any)=>(
-      (m.name||'').toLowerCase().includes(s) ||
-      (m.handle||'').toLowerCase().includes(s) ||
-      (m.userId||'').toLowerCase().includes(s) ||
-      (m.role||'').toLowerCase().includes(s)
-    ))
-  }, [q, orgMembers])
+  const filtered = useMemo(() => {
+    if (!q.trim()) return orgMembers || [];
+    const s = q.trim().toLowerCase();
+    return (orgMembers || []).filter((m: any) => (
+      (m.name || "").toLowerCase().includes(s) ||
+      (m.handle || "").toLowerCase().includes(s) ||
+      (m.userId || "").toLowerCase().includes(s) ||
+      (m.role || "").toLowerCase().includes(s)
+    ));
+  }, [q, orgMembers]);
 
-  if (isLoading) return <Shell><div className="card">Loading…</div></Shell>
-  if (isError)   return <Shell><div className="card">You don't have access to this org.</div></Shell>
-  if (!details)  return <Shell><div className="card">Org not found.</div></Shell>
+  if (isLoading)
+    return (
+      <Shell>
+        <div className="rounded-2xl border bg-white/80 p-4 shadow-sm backdrop-blur">
+          Loading…
+        </div>
+      </Shell>
+    );
+  if (isError)
+    return (
+      <Shell>
+        <div className="rounded-2xl border bg-white/80 p-4 shadow-sm backdrop-blur">
+          You don't have access to this org.
+        </div>
+      </Shell>
+    );
+  if (!details)
+    return (
+      <Shell>
+        <div className="rounded-2xl border bg-white/80 p-4 shadow-sm backdrop-blur">
+          Org not found.
+        </div>
+      </Shell>
+    );
 
   // Normalize when /details isn’t available
-  const safeName = (details as any).name ?? 'Organization'
-  const memberCount = (details as any).memberCount ?? (orgMembers?.length ?? 0)
-  const teamsFromDetails = (details as any).teams as any[] | undefined
-  const teamCards = (teamsFromDetails && Array.isArray(teamsFromDetails) ? teamsFromDetails : (teams || []))
+  const safeId = (details as any).id || (orgId as string);
+  const safeName = (details as any).name ?? "Organization";
+  const memberCount = (details as any).memberCount ?? (orgMembers?.length ?? 0);
+  const teamsFromDetails = (details as any).teams as any[] | undefined;
+  const teamCards: any[] = Array.isArray(teamsFromDetails)
+    ? teamsFromDetails
+    : Array.isArray(teams)
+    ? (teams as any[])
+    : [];
 
   const onSave = () => {
-    const el = document.getElementById('orgNameEdit') as HTMLInputElement
-    const name = el?.value?.trim()
-    if (name && name !== safeName) rename.mutate(name)
-  }
+    const el = document.getElementById("orgNameEdit") as HTMLInputElement | null;
+    const name = el?.value?.trim();
+    if (name && name !== safeName) rename.mutate(name);
+  };
 
   return (
     <Shell>
       {/* Page hero */}
-      <div className="rounded-3xl border bg-white p-5 shadow-sm mb-4">
+      <div className="mb-4 rounded-3xl border bg-white/80 p-5 shadow-sm backdrop-blur">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="text-xl font-semibold leading-tight">Manage {safeName}</h2>
-            <p className="text-slate-600 text-sm">{memberCount} member{memberCount===1?'':'s'}</p>
+            <div className="mb-1 inline-flex items-center gap-2 text-xs text-slate-600">
+              <FluxMarkWithWaves size={18} />
+              <span>Organization</span>
+            </div>
+            <h2 className="text-xl font-semibold leading-tight">
+              Manage {safeName}
+            </h2>
+            <p className="text-sm text-slate-600">
+              {memberCount} member{memberCount === 1 ? "" : "s"}
+            </p>
           </div>
-          <Link to="/orgs" className="btn-outline">← Back to All Organizations</Link>
+          <Link to="/orgs" className="btn-outline">
+            ← Back to All Organizations
+          </Link>
         </div>
-        <OrgJoinCode orgId={(details as any).id || (orgId as string)} />
+        <OrgJoinCode orgId={safeId} />
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">
         {/* Rename org + destructive action */}
-        <div className="card">
-          <h3 className="font-semibold mb-2">Organization details</h3>
+        <div className="rounded-2xl border bg-white/80 p-5 shadow-sm backdrop-blur">
+          <h3 className="mb-2 font-semibold">Organization details</h3>
           <label className="text-sm text-slate-600">Name</label>
-          <input id="orgNameEdit" className="input w-full mt-1" defaultValue={safeName}/>
+          <input
+            id="orgNameEdit"
+            className="input mt-1 w-full"
+            defaultValue={safeName}
+          />
           <div className="mt-3 flex gap-2">
-            <button className="btn" onClick={onSave} disabled={rename.isPending}>
-              {rename.isPending ? 'Saving…' : 'Save changes'}
-            </button>
-            <button
-              className="btn-outline"
-              onClick={()=>{
-                if (confirm('Delete this organization? This removes all teams and data.')) {
-                  deleteOrg.mutate()
+            <MiniBtn onClick={onSave} disabled={rename.isPending}>
+              {rename.isPending ? "Saving…" : "Save changes"}
+            </MiniBtn>
+            <MiniBtn
+              variant="outline"
+              onClick={() => {
+                if (
+                  confirm(
+                    "Delete this organization? This removes all teams and data."
+                  )
+                ) {
+                  deleteOrg.mutate();
                 }
               }}
             >
               Delete organization
-            </button>
+            </MiniBtn>
           </div>
         </div>
 
         {/* Members with search + controls */}
-        <div className="card">
-          <div className="flex items-center justify-between mb-2">
+        <div className="rounded-2xl border bg-white/80 p-5 shadow-sm backdrop-blur">
+          <div className="mb-2 flex items-center justify-between">
             <h3 className="font-semibold">Members ({memberCount})</h3>
             <input
               value={q}
-              onChange={e=>setQ(e.target.value)}
+              onChange={(e) => setQ(e.target.value)}
               className="input h-9 text-sm"
               placeholder="Search by name, handle, role…"
             />
           </div>
 
-          <ul className="max-h-[228px] overflow-auto pr-1 divide-y divide-slate-200 bg-white rounded-xl border border-slate-200">
+          <ul className="max-h-[228px] overflow-auto rounded-xl border border-slate-200 divide-y divide-slate-200 bg-white pr-1">
             {!filtered?.length && (
-              <li className="py-3 px-3 text-sm text-slate-500">No matching members.</li>
+              <li className="px-3 py-3 text-sm text-slate-500">
+                No matching members.
+              </li>
             )}
 
-            {filtered?.map((m:any)=> {
-              const isAdminUser = m.role === 'ADMIN'
+            {filtered?.map((m: any) => {
+              const isAdminUser = m.role === "ADMIN";
               return (
-                <li key={m.userId} className="py-2 px-3">
+                <li key={m.userId} className="px-3 py-2">
                   {/* Top: identity */}
                   <div className="mb-2">
-                    <div className="font-medium truncate flex items-center gap-2">
-                      <span className="truncate">{m.name || m.handle || m.userId}</span>
+                    <div className="flex items-center gap-2 truncate font-medium">
+                      <span className="truncate">
+                        {m.name || m.handle || m.userId}
+                      </span>
                       {isAdminUser && <AdminBadge />}
                     </div>
-                    <div className="text-xs text-slate-600 truncate">
+                    <div className="truncate text-xs text-slate-600">
                       @{m.handle || m.userId} — {m.role}
                     </div>
                   </div>
@@ -284,11 +379,14 @@ export default function OrgAdmin(){
                   <div className="flex flex-wrap items-center gap-2">
                     {/* Org role */}
                     <MiniSelect
-                      defaultValue={isAdminUser ? 'ADMIN' : 'MEMBER'}
-                      onChange={(e)=>{
-                        const newRole = e.target.value as 'ADMIN'|'MEMBER'
-                        if (newRole !== (isAdminUser ? 'ADMIN' : 'MEMBER')) {
-                          updateOrgRole.mutate({ userId: m.userId, role: newRole })
+                      defaultValue={isAdminUser ? "ADMIN" : "MEMBER"}
+                      onChange={(e) => {
+                        const newRole = e.target.value as "ADMIN" | "MEMBER";
+                        if (newRole !== (isAdminUser ? "ADMIN" : "MEMBER")) {
+                          updateOrgRole.mutate({
+                            userId: m.userId,
+                            role: newRole,
+                          });
                         }
                       }}
                       title="Change org role"
@@ -299,15 +397,23 @@ export default function OrgAdmin(){
 
                     {/* Team selection + add */}
                     <MiniSelect id={`teamSel-${m.userId}`} defaultValue="">
-                      <option value="" disabled>Choose team…</option>
-                      {teams?.map((t:any)=> <option key={t.id} value={t.id}>{t.name}</option>)}
+                      <option value="" disabled>
+                        Choose team…
+                      </option>
+                      {(teams || []).map((t: any) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name}
+                        </option>
+                      ))}
                     </MiniSelect>
                     <MiniBtn
                       variant="outline"
-                      onClick={()=>{
-                        const sel = document.getElementById(`teamSel-${m.userId}`) as HTMLSelectElement
-                        if (!sel?.value) return
-                        addToTeam.mutate({ userId: m.userId, teamId: sel.value })
+                      onClick={() => {
+                        const sel = document.getElementById(
+                          `teamSel-${m.userId}`
+                        ) as HTMLSelectElement | null;
+                        if (!sel?.value) return;
+                        addToTeam.mutate({ userId: m.userId, teamId: sel.value });
                       }}
                     >
                       Add
@@ -315,10 +421,15 @@ export default function OrgAdmin(){
 
                     {/* Make leader */}
                     <MiniBtn
-                      onClick={()=>{
-                        const sel = document.getElementById(`teamSel-${m.userId}`) as HTMLSelectElement
-                        if (!sel?.value) return
-                        makeLeader.mutate({ userId: m.userId, teamId: sel.value })
+                      onClick={() => {
+                        const sel = document.getElementById(
+                          `teamSel-${m.userId}`
+                        ) as HTMLSelectElement | null;
+                        if (!sel?.value) return;
+                        makeLeader.mutate({
+                          userId: m.userId,
+                          teamId: sel.value,
+                        });
                       }}
                     >
                       Make Lead
@@ -327,20 +438,30 @@ export default function OrgAdmin(){
                     {/* Remove from org (disabled for admins) */}
                     <MiniBtn
                       variant="outline"
-                      onClick={()=>{
-                        if (isAdminUser) return
-                        if (confirm(`Remove ${m.handle || m.name || m.userId} from this organization?`)) {
-                          removeFromOrg.mutate(m.userId)
+                      onClick={() => {
+                        if (isAdminUser) return;
+                        if (
+                          confirm(
+                            `Remove ${
+                              m.handle || m.name || m.userId
+                            } from this organization?`
+                          )
+                        ) {
+                          removeFromOrg.mutate(m.userId);
                         }
                       }}
                       disabled={isAdminUser}
-                      title={isAdminUser ? "Admins cannot be removed" : "Remove from organization"}
+                      title={
+                        isAdminUser
+                          ? "Admins cannot be removed"
+                          : "Remove from organization"
+                      }
                     >
                       Remove Member
                     </MiniBtn>
                   </div>
                 </li>
-              )
+              );
             })}
           </ul>
         </div>
@@ -348,135 +469,165 @@ export default function OrgAdmin(){
 
       {/* Teams — collapsible member lists, delete team, remove members */}
       <div className="mt-6">
-        <h3 className="font-semibold mb-2">Teams</h3>
+        <h3 className="mb-2 font-semibold">Teams</h3>
 
         {/* Create team */}
-        <div className="card mb-4">
-          <h3 className="font-semibold mb-2">Create a new team</h3>
+        <div className="card mb-4 rounded-2xl border bg-white/80 p-5 shadow-sm backdrop-blur">
+          <h3 className="mb-2 font-semibold">Create a new team</h3>
           <div className="flex gap-2">
             <input id="newTeamName" className="input flex-1" placeholder="New team name" />
-            <button
-              className="btn"
+            <MiniBtn
               onClick={() => {
-                const el = document.getElementById('newTeamName') as HTMLInputElement
-                const name = el?.value.trim()
-                if (!name) return
+                const el = document.getElementById(
+                  "newTeamName"
+                ) as HTMLInputElement | null;
+                const name = el?.value?.trim();
+                if (!name) return;
                 api.post(`/orgs/${orgId}/teams`, { name }).then(() => {
-                  el.value = ''
-                  qc.invalidateQueries({ queryKey: ['teamsForAdmin', orgId] })
-                  qc.invalidateQueries({ queryKey: ['orgDetails', orgId] })
-                })
+                  if (el) el.value = "";
+                  qc.invalidateQueries({ queryKey: ["teamsForAdmin", orgId] });
+                  qc.invalidateQueries({ queryKey: ["orgDetails", orgId] });
+                });
               }}
             >
               Create Team
-            </button>
+            </MiniBtn>
           </div>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-3">
-          {teamCards.map((t:any)=> {
-            const isOpen = openTeams[t.id]
-            const toggle = () => setOpenTeams(s => ({ ...s, [t.id]: !s[t.id] }))
+        <div className="grid gap-3 md:grid-cols-2">
+          {teamCards.map((t: any) => {
+            const isOpen = openTeams[t.id];
+            const toggle = () =>
+              setOpenTeams((s) => ({ ...s, [t.id]: !s[t.id] }));
             const roster = [
-              ...(t.leaders || []).map((u:any)=> ({ ...u, _role: 'LEADER' })),
-              ...(t.members || []).map((u:any)=> ({ ...u, _role: 'MEMBER' }))
-            ]
+              ...((t.leaders || []).map((u: any) => ({ ...u, _role: "LEADER" })) || []),
+              ...((t.members || []).map((u: any) => ({ ...u, _role: "MEMBER" })) || []),
+            ];
             return (
-              <div className="card" key={t.id}>
+              <div
+                className="card rounded-2xl border bg-white/80 p-5 shadow-sm backdrop-blur"
+                key={t.id}
+              >
                 <div className="flex items-start justify-between gap-2">
                   <div>
                     <div className="font-medium">{t.name}</div>
-                    <div className="text-sm text-slate-600 mt-1">
-                      Leaders: {t.leaders?.map((x:any)=> x.handle || x.name).join(', ') || 'none'}
+                    <div className="mt-1 text-sm text-slate-600">
+                      Leaders:{" "}
+                      {t.leaders?.map((x: any) => x.handle || x.name).join(", ") ||
+                        "none"}
                     </div>
                     <div className="text-sm text-slate-600">
-                      Members: {Array.isArray(t.members) ? t.members.length : (t.memberCount ?? 0)}
+                      Members:{" "}
+                      {Array.isArray(t.members)
+                        ? t.members.length
+                        : t.memberCount ?? 0}
                     </div>
                   </div>
                   <div className="flex gap-2">
-                    <button className="btn-outline" onClick={toggle}>
-                      {isOpen ? 'Hide members' : 'Show members'}
-                    </button>
-                    <button
-                      className="btn-outline"
-                      onClick={()=>{
-                        if (confirm(`Delete team "${t.name}"?`)) deleteTeam.mutate(t.id)
+                    <MiniBtn variant="outline" onClick={toggle}>
+                      {isOpen ? "Hide members" : "Show members"}
+                    </MiniBtn>
+                    <MiniBtn
+                      variant="outline"
+                      onClick={() => {
+                        if (confirm(`Delete team "${t.name}"?`))
+                          deleteTeam.mutate(t.id);
                       }}
                     >
                       Delete team
-                    </button>
+                    </MiniBtn>
                   </div>
                 </div>
 
                 {isOpen && (
                   <div className="mt-3">
-                    {!roster.length && <div className="text-sm text-slate-500">No members yet.</div>}
-                    <ul className="space-y-2 max-h-56 overflow-auto pr-1">
-                      {roster.map((u:any)=> (
-                        <li key={u.userId} className="flex items-center justify-between">
+                    {!roster.length && (
+                      <div className="text-sm text-slate-500">
+                        No members yet.
+                      </div>
+                    )}
+                    <ul className="max-h-56 space-y-2 overflow-auto pr-1">
+                      {roster.map((u: any) => (
+                        <li
+                          key={u.userId}
+                          className="flex items-center justify-between"
+                        >
                           <div>
-                            <div className="font-medium">{u.name || u.handle}</div>
-                            <div className="text-xs text-slate-600">@{u.handle || u.userId} — {u._role}</div>
+                            <div className="font-medium">
+                              {u.name || u.handle}
+                            </div>
+                            <div className="text-xs text-slate-600">
+                              @{u.handle || u.userId} — {u._role}
+                            </div>
                           </div>
-                          <button
-                            className="btn-outline"
-                            onClick={()=>{
-                              if (confirm(`Remove ${u.handle || u.name || u.userId} from team "${t.name}"?`)) {
-                                removeFromTeam.mutate({ teamId: t.id, userId: u.userId })
+                          <MiniBtn
+                            variant="outline"
+                            onClick={() => {
+                              if (
+                                confirm(
+                                  `Remove ${
+                                    u.handle || u.name || u.userId
+                                  } from team "${t.name}"?`
+                                )
+                              ) {
+                                removeFromTeam.mutate({
+                                  teamId: t.id,
+                                  userId: u.userId,
+                                });
                               }
                             }}
                           >
                             Remove
-                          </button>
+                          </MiniBtn>
                         </li>
                       ))}
                     </ul>
                   </div>
                 )}
 
-                <Link className="btn-outline mt-3 inline-flex" to={`/team/${t.id}`}>Open team</Link>
+                <Link className="btn-outline mt-3 inline-flex" to={`/team/${t.id}`}>
+                  Open team
+                </Link>
               </div>
-            )
+            );
           })}
         </div>
       </div>
     </Shell>
-  )
+  );
 }
 
-/* ------------------------------- Shell --------------------------------- */
+/* --------------------------------- Shell -------------------------------- */
 
-function Shell({ children }: { children: React.ReactNode }){
+function Shell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen relative overflow-x-hidden isolate">
-      {/* fixed, subtle background — now *well* behind content */}
-      <div className="pointer-events-none fixed inset-0 -z-50 bg-gradient-to-br from-slate-50 via-indigo-50 to-sky-50" />
-      <div className="pointer-events-none fixed -top-24 -left-24 h-[520px] w-[520px] rounded-full bg-sky-200/40 blur-3xl -z-50" />
-      <div className="pointer-events-none fixed -bottom-24 -right-24 h-[520px] w-[520px] rounded-full bg-indigo-200/40 blur-3xl -z-50" />
+    <div className="relative min-h-screen overflow-x-hidden isolate">
+      {/* Background */}
+      <div className="pointer-events-none fixed inset-0 -z-50 bg-gradient-to-br from-indigo-50 via-sky-50 to-white" />
+      <FluxWaves className="pointer-events-none fixed inset-x-0 -top-20 -z-40 opacity-60" />
 
+      {/* Top bar */}
       <div className="sticky top-0 z-20 border-b bg-white/70 backdrop-blur">
         <div className="container flex h-14 items-center justify-between">
-          <div className="inline-flex items-center gap-2 font-semibold">
-            <Logo className="h-5 w-5" />
-            TaskTracker
-          </div>
-          <Link to="/orgs" className="btn-outline">All Organizations</Link>
+          <Link
+            to="/orgs"
+            aria-label="Go to home"
+            className="inline-flex items-center gap-3 group rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 cursor-pointer"
+          >
+            <FluxLogo size={20} />
+            <span className="hidden sm:inline text-xs font-medium text-slate-500 group-hover:text-slate-700">
+              Team execution, simplified
+            </span>
+          </Link>
+
+          <Link to="/orgs" className="btn-outline">
+            All Organizations
+          </Link>
         </div>
       </div>
 
-      <div className="container py-6 space-y-6 z-0">
-        {children}
-      </div>
+      <div className="container z-0 space-y-6 py-6">{children}</div>
     </div>
-  )
-}
-
-
-function Logo(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" {...props}>
-      <path d="M5 4a2 2 0 00-2 2v12.5A1.5 1.5 0 004.5 20H18a2 2 0 002-2V7.5A1.5 1.5 0 0018.5 6H12l-2-2H5z" />
-      <path d="M7 10h10v2H7zM7 14h6v2H7z" className="opacity-70" />
-    </svg>
-  )
+  );
 }
