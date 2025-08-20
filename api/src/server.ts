@@ -179,9 +179,11 @@ function randCode(len = 12) {
 /* Me                                                                 */
 /* ------------------------------------------------------------------ */
 
+// server.ts (/me route)
 app.get("/me", async (req: any, res) => {
   const uid = requireUser(req, res);
   if (!uid) return;
+
   const user = await prisma.user.findUnique({
     where: { id: uid },
     include: {
@@ -189,8 +191,16 @@ app.get("/me", async (req: any, res) => {
       teamMemberships: { include: { team: true } },
     },
   });
+
+  if (!user) {
+    // user row is gone -> kill app session and force re-auth
+    res.clearCookie("token", cookieOpts());
+    return res.sendStatus(401);
+  }
+
   res.json(user);
 });
+
 
 /* ------------------------------------------------------------------ */
 /* Orgs & Teams                                                       */
@@ -715,26 +725,26 @@ app.post("/teams/:teamId/tasks", async (req: any, res) => {
   res.json(t);
 });
 
-app.patch("/tasks/:taskId", async (req: any, res) => {
-  const uid = requireUser(req, res);
-  if (!uid) return;
-  const task = await prisma.task.findUnique({
-    where: { id: req.params.taskId },
-    include: { team: true, assignees: true },
-  });
-  if (!task) return res.sendStatus(404);
-  const adminOrLeader = await canWriteTeam(task.teamId, uid);
-  if (!adminOrLeader) {
-    const isAssignee = task.assignees.some((a) => a.userId === uid);
-    const onlyStatus = Object.keys(req.body).every((k) => k === "status");
-    if (!(isAssignee && onlyStatus)) return res.sendStatus(403);
-  }
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: req.body,
-  });
-  res.json(updated);
-});
+// app.patch("/tasks/:taskId", async (req: any, res) => {
+//   const uid = requireUser(req, res);
+//   if (!uid) return;
+//   const task = await prisma.task.findUnique({
+//     where: { id: req.params.taskId },
+//     include: { team: true, assignees: true },
+//   });
+//   if (!task) return res.sendStatus(404);
+//   const adminOrLeader = await canWriteTeam(task.teamId, uid);
+//   if (!adminOrLeader) {
+//     const isAssignee = task.assignees.some((a) => a.userId === uid);
+//     const onlyStatus = Object.keys(req.body).every((k) => k === "status");
+//     if (!(isAssignee && onlyStatus)) return res.sendStatus(403);
+//   }
+//   const updated = await prisma.task.update({
+//     where: { id: task.id },
+//     data: req.body,
+//   });
+//   res.json(updated);
+// });
 
 app.post("/tasks/:taskId/assignees", async (req: any, res) => {
   const uid = requireUser(req, res);
@@ -781,39 +791,44 @@ app.delete("/tasks/:taskId/assignees/:userId", async (req: any, res) => {
   res.json({ ok: true });
 });
 
-app.delete("/tasks/:taskId", async (req: any, res: any, next: any) => {
-  try {
-    const uid = requireUser(req, res);
-    if (!uid) return;
+// DELETE /tasks/:taskId
+app.delete("/tasks/:taskId", async (req: any, res: any) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
 
-    const task = await prisma.task.findUnique({
-      where: { id: req.params.taskId },
-      include: { team: true },
-    });
-    if (!task) return res.sendStatus(404);
+  const task = await prisma.task.findUnique({
+    where: { id: req.params.taskId },
+    include: { team: true },
+  });
+  if (!task) return res.sendStatus(404);
+  if (!(await canWriteTeam(task.teamId, uid))) return res.sendStatus(403);
 
-    const can = await canWriteTeam(task.teamId, uid);
-    if (!can) return res.sendStatus(403);
+  // Single delete — DB cascades will clear TaskStatusLog, TaskNote, Mentions,
+  // Assignments, and (depending on your choice) CalendarEvent
+  await prisma.task.delete({ where: { id: task.id } });
 
-    const notes = await prisma.taskNote.findMany({
-      where: { taskId: task.id },
-      select: { id: true },
-    });
-    const noteIds = notes.map((n) => n.id);
-
-    await prisma.$transaction([
-      prisma.taskNoteMention.deleteMany({ where: { noteId: { in: noteIds } } }),
-      prisma.taskNote.deleteMany({ where: { taskId: task.id } }),
-      prisma.taskAssignment.deleteMany({ where: { taskId: task.id } }),
-      prisma.calendarEvent.deleteMany({ where: { relatedTaskId: task.id } }),
-      prisma.task.delete({ where: { id: task.id } }),
-    ]);
-
-    res.json({ ok: true });
-  } catch (err) {
-    next(err);
-  }
+  res.json({ ok: true });
 });
+
+// GET /tasks/:taskId
+app.get("/tasks/:taskId", async (req: any, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+
+  const task = await prisma.task.findUnique({
+    where: { id: req.params.taskId },
+    include: {
+      team: { select: { id: true, name: true, orgId: true } },
+      assignees: { include: { user: { select: { id: true, name: true, handle: true } } } },
+      notes: { orderBy: { createdAt: "asc" } },
+    },
+  });
+  if (!task) return res.sendStatus(404);
+  if (!(await canReadTeam(task.teamId, uid))) return res.sendStatus(403);
+
+  res.json(task);
+});
+
 
 /* ------------------------------------------------------------------ */
 /* Org admin API                                                      */
@@ -963,6 +978,132 @@ app.get("/orgs/:orgId/details", async (req: any, res) => {
 
   res.json({ id: org.id, name: org.name, memberCount, teams: shapedTeams });
 });
+
+async function isAdminOrLeader(teamId: string, userId: string) {
+  const team = await prisma.team.findUnique({ where: { id: teamId } });
+  if (!team) return false;
+  if (await isOrgAdmin(team.orgId, userId)) return true;
+  return await isTeamLeader(teamId, userId);
+}
+
+
+app.patch("/tasks/:taskId", async (req: any, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+
+  const task = await prisma.task.findUnique({
+    where: { id: req.params.taskId },
+    include: { team: true, assignees: true },
+  });
+  if (!task) return res.sendStatus(404);
+
+  // Permission: admins/leaders can update anything; assignees can update status only
+  const adminOrLeader = await canWriteTeam(task.teamId, uid);
+  if (!adminOrLeader) {
+    const isAssignee = task.assignees.some((a) => a.userId === uid);
+    const onlyStatus = Object.keys(req.body).every((k) => k === "status");
+    if (!(isAssignee && onlyStatus)) return res.sendStatus(403);
+  }
+
+  // Keep prior status for comparison
+  const prevStatus = task.status;
+  const nextStatus = req.body?.status;
+
+  const updated = await prisma.task.update({
+    where: { id: task.id },
+    data: req.body,
+  });
+
+  // NEW: status-change audit
+  if (
+    typeof nextStatus === "string" &&
+    nextStatus &&
+    nextStatus !== prevStatus
+  ) {
+    await prisma.taskStatusLog.create({
+      data: {
+        taskId: task.id,
+        teamId: task.teamId,
+        oldStatus: prevStatus,
+        newStatus: nextStatus,
+        changedBy: uid,
+        // changedAt defaults to now()
+      },
+    });
+  }
+
+  res.json(updated);
+});
+
+// GET /teams/:teamId/activity?from=ISO&to=ISO&userId=ALL|<uid>&limit=50
+app.get("/teams/:teamId/activity", async (req: any, res) => {
+  const uid = requireUser(req, res);
+  if (!uid) return;
+
+  const { teamId } = req.params;
+  if (!(await isAdminOrLeader(teamId, uid))) return res.sendStatus(403);
+
+  const from = req.query.from ? new Date(String(req.query.from)) : null;
+  const to   = req.query.to   ? new Date(String(req.query.to))   : null;
+  const userId = (req.query.userId && req.query.userId !== "ALL")
+    ? String(req.query.userId)
+    : null;
+
+  let limit = Number(req.query.limit ?? 50);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+  if (limit > 200) limit = 200;
+
+  // Build where clause
+  const where: any = { teamId };
+  if (from || to) {
+    where.changedAt = {};
+    if (from) where.changedAt.gte = from;
+    if (to)   where.changedAt.lte = to;
+  }
+  if (userId) where.changedBy = userId;
+
+  const rows = await prisma.taskStatusLog.findMany({
+    where,
+    orderBy: [{ changedAt: "desc" }, { id: "desc" }],
+    take: limit,
+  });
+
+  // Enrich with task title and user name/handle (2 small fetches)
+  const taskIds = [...new Set(rows.map(r => r.taskId))];
+  const userIds = [...new Set(rows.map(r => r.changedBy))];
+
+  const [tasks, users] = await Promise.all([
+    taskIds.length ? prisma.task.findMany({
+      where: { id: { in: taskIds } },
+      select: { id: true, title: true },
+    }) : Promise.resolve([]),
+    userIds.length ? prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, name: true, handle: true, email: true },
+    }) : Promise.resolve([]),
+  ]);
+
+  const taskById = new Map(tasks.map(t => [t.id, t]));
+  const userById = new Map(users.map(u => [u.id, u]));
+
+  const data = rows.map(r => ({
+  id: r.id,
+  taskId: r.taskId,
+  teamId: r.teamId,
+  oldStatus: r.oldStatus,
+  newStatus: r.newStatus,
+  changedAt: r.changedAt,
+  taskTitle: taskById.get(r.taskId)?.title ?? "Untitled task",
+  link: `/tasks/${r.taskId}`, // <— add
+  changedBy: {
+    id: r.changedBy,
+    name: userById.get(r.changedBy)?.name ?? null,
+    handle: userById.get(r.changedBy)?.handle ?? null,
+  },
+}));
+res.json(data);
+});
+
 
 /* ------------------------------------------------------------------ */
 /* Notes & Info                                                       */

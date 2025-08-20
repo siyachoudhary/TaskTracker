@@ -17,6 +17,24 @@ const STATUS = [
   { key: "DONE",        label: "Done" },
 ] as const;
 
+const STATUS_LABEL: Record<StatusKey, string> = {
+  TODO: "To do",
+  IN_PROGRESS: "In progress",
+  BLOCKED: "Blocked",
+  DONE: "Done",
+};
+
+type ActivityRow = {
+  id: string;
+  taskId: string;
+  taskTitle: string;
+  oldStatus: StatusKey | null;
+  newStatus: StatusKey;
+  changedAt: string;
+  changedBy: { id: string; name?: string | null; handle?: string | null };
+  link?: string;
+};
+
 type Perms = {
   role: "ADMIN" | "LEADER" | "MEMBER";
   canCreateTasks: boolean;
@@ -65,17 +83,78 @@ function dayCardClasses(t: TaskLike) {
 /* Page                                                                    */
 /* ---------------------------------------------------------------------- */
 
+
+function normalizeActivityPayload(d: any): ActivityRow[] {
+  const list = Array.isArray(d) ? d
+    : Array.isArray(d?.items) ? d.items
+    : Array.isArray(d?.rows) ? d.rows
+    : Array.isArray(d?.activity) ? d.activity
+    : [];
+
+  return list.map((r: any): ActivityRow => {
+    // Support multiple possible shapes/field names defensively
+    const taskTitle =
+      r.taskTitle ??
+      r.task?.title ??
+      r.task_name ??
+      "Untitled task";
+
+    const oldStatus: StatusKey | null =
+      (r.oldStatus ?? r.fromStatus ?? r.prevStatus ?? null) as StatusKey | null;
+
+    const newStatus: StatusKey =
+      (r.newStatus ?? r.toStatus ?? r.status ?? "TODO") as StatusKey;
+
+    // changedBy can be a string id + a separate name, or a nested user object
+    const changedById =
+      r.changedBy?.id ?? r.changedBy ?? r.userId ?? r.user?.id ?? "";
+    const changedByName =
+      r.changedBy?.name ?? r.changedByName ?? r.user?.name ?? r.user_name ?? null;
+    const changedByHandle =
+      r.changedBy?.handle ?? r.user?.handle ?? r.user_handle ?? null;
+
+    const when =
+      r.changedAt ?? r.createdAt ?? r.timestamp ?? new Date().toISOString();
+    const taskId = String(r.taskId ?? r.task_id ?? r.task?.id ?? "");
+  const link = r.link ?? (taskId ? `/tasks/${taskId}` : undefined);
+
+    return {
+    id: String(r.id ?? `${changedById}:${when}:${taskTitle}`),
+    taskId,
+    taskTitle,
+    oldStatus,
+    newStatus,
+    changedAt: typeof when === "string" ? when : new Date(when).toISOString(),
+    changedBy: { id: String(changedById || ""), name: changedByName, handle: changedByHandle },
+    link,
+  };
+  });
+}
+
+
 export default function Team() {
   const { id } = useParams<{ id: string }>();
-  const [tab, setTab] = useState<"tasks" | "deadlines" | "info">("tasks");
+  type TabKey = "tasks" | "deadlines" | "info" | "activity";
+  const [tab, setTab] = useState<TabKey>("tasks");
   const [teamName, setTeamName] = useState("Team");
+  const { data: perms } = useQuery<Perms>({
+  queryKey: ["perms", id],
+  queryFn: async () => (await api.get(`/teams/${id}/permissions`)).data,
+  enabled: !!id,
+});
+const canSeeActivity = !!perms && (perms.role === "ADMIN" || perms.role === "LEADER");
+
 
   // read tab from URL hash
   useEffect(() => {
-    const m = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-    const t = m.get("tab");
-    if (t === "deadlines" || t === "info" || t === "tasks") setTab(t as any);
-  }, []);
+  const m = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const t = m.get("tab");
+  if (t === "deadlines" || t === "info" || t === "tasks" || t === "activity") {
+    if (t === "activity" && !canSeeActivity) setTab("tasks");
+    else setTab(t as any);
+  }
+}, [canSeeActivity]);
+
   useEffect(() => {
     const m = new URLSearchParams();
     m.set("tab", tab);
@@ -125,6 +204,10 @@ export default function Team() {
             <TabButton active={tab==="tasks"} onClick={()=>setTab("tasks")}>Tasks</TabButton>
             <TabButton active={tab==="deadlines"} onClick={()=>setTab("deadlines")}>Deadlines</TabButton>
             <TabButton active={tab==="info"} onClick={()=>setTab("info")}>Info</TabButton>
+            {canSeeActivity && (
+              <TabButton active={tab==="activity"} onClick={()=>setTab("activity")}>Activity</TabButton>
+            )}
+
           </div>
         </div>
       </div>
@@ -134,6 +217,8 @@ export default function Team() {
         {tab === "tasks"     && <TasksTab teamId={id} />}
         {tab === "deadlines" && <DeadlinesTab teamId={id} />}
         {tab === "info"      && <InfoTab teamId={id} onRenamed={(n)=>setTeamName(n)} />}
+        {tab === "activity"  && canSeeActivity && <ActivityTab teamId={id} />}
+
       </div>
     </div>
   );
@@ -1808,6 +1893,190 @@ function pick(o: Option) {
   );
 }
 
+function ActivityTab({ teamId }: { teamId: string }) {
+  const { data: members } = useQuery({
+    queryKey: ["members", teamId],
+    queryFn: async () => (await api.get(`/teams/${teamId}/members`)).data,
+    enabled: !!teamId,
+  });
+
+  // Filters
+  const [range, setRange] = useState<"7d" | "30d" | "90d" | "all">("7d");
+  
+  const [userId, setUserId] = useState<string>("ALL");
+  const [q, setQ] = useState("");
+  const [modalOpen, setModalOpen] = useState(false);
+const [activeTask, setActiveTask] = useState<any | null>(null);
+
+function closeModal() {
+  setModalOpen(false);
+  setActiveTask(null);
+}
+const { data: perms } = useQuery<Perms>({
+    queryKey: ["perms", teamId],
+    queryFn: async () => (await api.get(`/teams/${teamId}/permissions`)).data,
+    enabled: !!teamId,
+  });
+async function openFromActivity(row: ActivityRow) {
+  if (!row.taskId) return;
+  try {
+    const res = await api.get(`/tasks/${row.taskId}`); // uses the new GET /tasks/:taskId
+    setActiveTask(res.data);
+    setModalOpen(true);
+  } catch (e: any) {
+    // If the task was deleted (cascade), the log is gone too on new fetches,
+    // but if the UI still has a stale row: show a lightweight notice.
+    alert("Task no longer exists or you don't have access.");
+  }
+}
+
+
+  const { startISO, endISO } = useMemo(() => {
+    if (range === "all") return { startISO: undefined, endISO: undefined };
+    const end = dayjs();
+    const start =
+      range === "7d"  ? end.subtract(7, "day") :
+      range === "30d" ? end.subtract(30, "day") :
+      end.subtract(90, "day");
+    return { startISO: start.toISOString(), endISO: end.toISOString() };
+  }, [range]);
+
+  const params: Record<string, string> = {};
+  if (startISO) params.from = startISO;
+  if (endISO) params.to = endISO;
+  if (userId !== "ALL") params.userId = userId;
+  if (q.trim()) params.q = q.trim();
+
+  
+
+  if (startISO) params.from = startISO;
+  if (endISO) params.to = endISO;
+  if (userId !== "ALL") params.userId = userId;
+  if (q.trim()) params.q = q.trim();
+
+  const qs = new URLSearchParams(params).toString();
+  const url = `/teams/${teamId}/activity${qs ? `?${qs}` : ""}`;
+
+  const { data = [], isLoading } = useQuery<ActivityRow[]>({
+    queryKey: ["activity", teamId, qs], // use string, not object, for stability
+    queryFn: async () => {
+      const res = await api.get(url);
+      return normalizeActivityPayload(res.data);
+    },
+    enabled: !!teamId,
+  });
+
+
+// group by day (desc)
+const grouped = useMemo(() => {
+  const rows = (Array.isArray(data) ? data : []).slice().sort(
+    (a, b) => dayjs(b.changedAt).valueOf() - dayjs(a.changedAt).valueOf()
+  );
+  const map = new Map<string, ActivityRow[]>();
+  for (const r of rows) {
+    const k = dayjs(r.changedAt).format("YYYY-MM-DD");
+    if (!map.has(k)) map.set(k, []);
+    map.get(k)!.push(r);
+  }
+  return Array.from(map.entries()).sort(([a], [b]) => (a < b ? 1 : -1));
+}, [data]);
+
+
+  return (
+    <div className="space-y-4">
+      {/* Controls */}
+      <div className="rounded-2xl border bg-white shadow-sm p-3 flex flex-wrap items-center gap-2">
+        <select className="select" value={range} onChange={e=>setRange(e.target.value as any)}>
+          <option value="7d">Last 7 days</option>
+          <option value="30d">Last 30 days</option>
+          <option value="90d">Last 90 days</option>
+          <option value="all">All time</option>
+        </select>
+
+        <input
+          className="input md:w-64"
+          placeholder="Search task/user…"
+          value={q}
+          onChange={e=>setQ(e.target.value)}
+        />
+
+        <select className="select" value={userId} onChange={e=>setUserId(e.target.value)}>
+          <option value="ALL">All users</option>
+          {(members || []).map((m:any)=>(
+            <option key={m.userId} value={m.userId}>
+              {m.name || m.handle || m.userId}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {/* List */}
+      <div className="rounded-2xl border bg-white shadow-sm">
+        {isLoading ? (
+          <div className="p-4 text-sm text-slate-500">Loading…</div>
+        ) : !grouped.length ? (
+          <div className="p-4 text-sm text-slate-500">No activity in this range.</div>
+        ) : (
+          <ul className="divide-y">
+            {grouped.map(([day, rows]) => (
+              <li key={day} className="p-4">
+                <div className="text-xs font-semibold text-slate-600 mb-2">
+                  {dayjs(day).format("dddd, MMM D, YYYY")}
+                </div>
+                <div className="space-y-2">
+                  {rows.map(r => (
+  <button
+    key={r.id}
+    className="w-full text-left flex items-start gap-3 hover:bg-slate-50 rounded-lg px-2 py-1"
+    onClick={() => openFromActivity(r)}
+    title={r.link || `Open ${r.taskTitle}`}
+  >
+    <div className="mt-1 h-2 w-2 rounded-full bg-slate-300 shrink-0" />
+    <div className="min-w-0">
+      <div className="text-sm">
+        <span className="font-medium">
+          {r.changedBy?.name || r.changedBy?.handle || r.changedBy?.id || "Someone"}
+        </span>{" "}
+        moved{" "}
+        <span className="font-medium underline">{r.taskTitle}</span>{" "}
+        {r.oldStatus ? (
+          <>
+            from <span className="font-medium">{STATUS_LABEL[r.oldStatus]}</span> to{" "}
+          </>
+        ) : (
+          <>to </>
+        )}
+        <span className="font-medium">{STATUS_LABEL[r.newStatus]}</span>
+      </div>
+      <div className="text-xs text-slate-500">
+        {dayjs(r.changedAt).format("HH:mm")}
+      </div>
+    </div>
+  </button>
+))}
+
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {modalOpen && activeTask && (
+  <TaskModal
+    task={activeTask}
+    teamId={teamId}
+    perms={perms}
+    members={members}
+    onClose={closeModal}
+  />
+)}
+
+    </div>
+  );
+  
+}
+
+
 /* Small inline “add link” control */
 function AddLinkInline({ onAdd }:{ onAdd:(label:string, url:string)=>void }) {
   const [label, setLabel] = useState("");
@@ -1835,3 +2104,4 @@ function AddLinkInline({ onAdd }:{ onAdd:(label:string, url:string)=>void }) {
     </div>
   );
 }
+
